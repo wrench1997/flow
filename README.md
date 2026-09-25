@@ -22,6 +22,8 @@ One executable starts both the desktop interface and embedded download engine. N
 
 ## Build and run
 
+**Ready-to-run Windows build:** download `Flow.exe` from [GitHub Releases](https://github.com/wrench1997/flow/releases/latest). SHA-256 checksums are included with each release.
+
 Supported desktop target: **Windows x64 (MSVC)**. Building requires Rust/Cargo and Visual Studio C++ build tools with the Windows SDK.
 
 ```powershell
