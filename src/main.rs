@@ -126,7 +126,11 @@ fn status(t: &Value) -> &str {
     if !text(t, "error").is_empty() {
         "错误"
     } else if t["paused"].as_bool().unwrap_or(false) {
-        "已暂停"
+        if num(t, "progress") >= 1.0 {
+            "已完成"
+        } else {
+            "已暂停"
+        }
     } else if num(t, "progress") >= 1.0 {
         if text(t, "kind") == "http" {
             "已完成"
@@ -459,7 +463,7 @@ impl DownloadApp {
                         });
                         ui.add_space(12.0);
                         ui.label(format!("保存位置：{}",text(&t,"save_path")));
-                        ui.weak("完成后继续做种，暂停可停止上传。未知指标表示引擎没有公开该数据；Tracker 做种统计可在 Tracker 页查看。");
+                        ui.weak("默认完成后停止做种；可在设置中开启完成后继续做种。未知指标表示引擎没有公开该数据；Tracker 做种统计可在 Tracker 页查看。");
                     }
                     1 => {
                         let files = list(&self.state["detail"]["files"]);
@@ -1109,6 +1113,11 @@ impl eframe::App for DownloadApp {
                     });
                     ui.separator();
                     ui.label("全局限速，0 表示不限速；保存后立即生效。");
+                    ui.checkbox(
+                        &mut config.seed_after_download,
+                        "下载完成后继续做种（默认关闭）",
+                    );
+                    ui.weak("关闭后自动停止已完成任务的上传；下载过程中仍可能上传已有分片。");
                     ui.checkbox(
                         &mut config.background_on_close,
                         "关闭窗口后在系统托盘继续下载",

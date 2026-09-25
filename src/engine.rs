@@ -409,7 +409,35 @@ impl Engine {
                 let Ok(entry) = engine.entry(&task_id) else {
                     break;
                 };
-                let state = handle.stats().state;
+                let stats = handle.stats();
+                let state = stats.state;
+                if stats.finished && !engine.settings.lock().unwrap().seed_after_download {
+                    let result = async {
+                        if matches!(state, librqbit::TorrentStatsState::Live) {
+                            engine.session.pause(&handle).await?;
+                        }
+                        if !entry.paused {
+                            if let Some(e) = engine
+                                .entries
+                                .lock()
+                                .unwrap()
+                                .iter_mut()
+                                .find(|e| e.id == task_id)
+                            {
+                                e.paused = true;
+                            }
+                            engine.persist()?;
+                            engine.event(&task_id, "info", "complete", "下载完成，已自动停止做种");
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        engine.error(&task_id, &format!("停止做种失败：{error:#}"));
+                        break;
+                    }
+                    continue;
+                }
                 let result =
                     if !entry.paused && matches!(state, librqbit::TorrentStatsState::Paused) {
                         engine.session.unpause(&handle).await
@@ -606,6 +634,19 @@ impl Engine {
         match action {
             "pause" | "resume" => {
                 let h = handle.context("任务正在解析，请等待后重试")?;
+                if action == "resume"
+                    && h.stats().finished
+                    && !self.settings.lock().unwrap().seed_after_download
+                {
+                    if matches!(h.stats().state, librqbit::TorrentStatsState::Live) {
+                        self.session.pause(&h).await?;
+                    }
+                    if let Some(e) = self.entries.lock().unwrap().iter_mut().find(|e| e.id == id) {
+                        e.paused = true;
+                    }
+                    self.persist()?;
+                    return Ok(());
+                }
                 if action == "pause" {
                     if !h.is_paused()
                         && !matches!(h.stats().state, librqbit::TorrentStatsState::Paused)
@@ -1035,6 +1076,8 @@ impl Engine {
                     error.clone()
                 } else if initializing {
                     format!("校验已有文件 {:.1}%（不是下载完成度）", ratio * 100.0)
+                } else if actually_paused && stats.finished {
+                    "下载完成，已停止做种".into()
                 } else if actually_paused {
                     "任务已暂停".into()
                 } else if stats.finished {
@@ -1573,7 +1616,22 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(&tail[..], &payload[payload.len() - 4096..]);
-        wait("finished transfer/check", || handle.stats().finished).await;
+        wait("download completion", || handle.stats().finished).await;
+        wait("automatic stop after completion", || {
+            handle.is_paused() && client.entry("local").unwrap().paused
+        })
+        .await;
+        client.action("local", "resume", "").await.unwrap();
+        assert!(handle.is_paused());
+        client.settings.lock().unwrap().seed_after_download = true;
+        client.action("local", "resume", "").await.unwrap();
+        assert!(!handle.is_paused());
+        client.settings.lock().unwrap().seed_after_download = false;
+        wait("stop existing seeder after settings change", || {
+            handle.is_paused()
+        })
+        .await;
+
         assert_eq!(
             std::fs::read(existing.join("payload.bin")).unwrap(),
             payload
@@ -1585,7 +1643,7 @@ mod tests {
             && value == format!("urn:btih:{}", handle.info_hash().as_string())));
         client.action("local", "recheck", "").await.unwrap();
         let handle = client.handle("local").unwrap();
-        wait("finished transfer/check", || handle.stats().finished).await;
+        wait("recheck completion", || handle.stats().finished).await;
         let neighbor = existing.join("unrelated.txt");
         std::fs::write(&neighbor, b"keep me").unwrap();
         client

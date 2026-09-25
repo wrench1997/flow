@@ -2,6 +2,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub seed_after_download: bool,
     #[serde(default = "background_default")]
     pub background_on_close: bool,
     pub download_dir: String,
@@ -12,6 +14,7 @@ pub struct Settings {
 impl Settings {
     pub fn defaults(root: &std::path::Path) -> Self {
         Self {
+            seed_after_download: false,
             background_on_close: true,
             download_dir: root.join("downloads").display().to_string(),
             download_kib: 0,
@@ -34,4 +37,22 @@ impl Settings {
 }
 fn background_default() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_settings_default_to_no_seeding() {
+        let root = std::env::temp_dir();
+        let defaults = Settings::defaults(&root);
+        assert!(!defaults.seed_after_download);
+        let mut value = serde_json::to_value(defaults).unwrap();
+        value.as_object_mut().unwrap().remove("seed_after_download");
+        assert!(
+            !serde_json::from_value::<Settings>(value)
+                .unwrap()
+                .seed_after_download
+        );
+    }
 }

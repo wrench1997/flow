@@ -8,6 +8,12 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
+## What is new in v0.3.1
+
+- Completed BT tasks stop seeding automatically by default, including existing configurations.
+- Opt in with **Continue seeding after download** in Settings; turning it off also stops completed tasks that are currently seeding.
+- Completed, stopped tasks show **Completed**. Downloading tasks can still upload available pieces.
+
 ## What is new in v0.3.0
 
 - Right-click media tasks to play or stream while downloading; automatically detect common video/audio file types.
@@ -57,7 +63,7 @@ The repository includes source and application assets only. Executables, downloa
 
 Open **Settings** to choose the default download folder and speed limits. `0` means unlimited. Speed limits apply immediately; the connection limit applies after restarting. The default folder affects new tasks only and does not move existing files.
 
-The default upload limit is **512 KiB/s**. Finished BitTorrent tasks continue seeding until paused. By default, closing the window hides Flow in the system tray and downloads continue. Double-click the tray icon to restore the window; choose **Exit and stop downloads** from its menu to stop the engine. Disable **Background downloading on close** in Settings to exit when closing the window.
+The default upload limit is **512 KiB/s**. By default, completed BitTorrent tasks automatically stop seeding. Enable **Continue seeding after download** in Settings to opt in. This also applies to older configurations; downloading tasks may still upload available pieces. By default, closing the window hides Flow in the system tray and downloads continue. Double-click the tray icon to restore the window; choose **Exit and stop downloads** from its menu to stop the engine. Disable **Background downloading on close** in Settings to exit when closing the window.
 
 Removal defaults to keeping files. You can instead delete incomplete files (including HTTP partial files), or all files owned by the task. File deletion is permanent and does not use the Recycle Bin; unrelated files and directories are retained.
 
