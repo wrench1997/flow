@@ -1,6 +1,6 @@
 [package]
 name = "flow-download"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -19,6 +19,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde_bencode = "0.2"
 rfd = { version = "0.17.2", default-features = false }
+tray-icon = { version = "0.25.1", default-features = false }
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

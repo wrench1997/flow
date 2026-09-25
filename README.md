@@ -1,6 +1,6 @@
 # Flow
 
-**A Windows BitTorrent download manager built with Rust, egui, and librqbit.**
+**A Windows BitTorrent and HTTP(S) download manager built with Rust, egui, and librqbit.**
 
 English · [简体中文](README.zh-CN.md)
 
@@ -12,7 +12,11 @@ One executable starts both the desktop interface and embedded download engine. N
 
 - Magnet links and local `.torrent` files, with native file and folder pickers.
 - Compact task list with search, status filters, file progress, peer details, and diagnostic events.
-- Pause/resume, verify existing files, and remove tasks while keeping downloaded files.
+- Pause/resume and verify existing torrent files.
+- HTTP/HTTPS direct downloads with validated range resume when supported by the server.
+- Torrent file selection, per-task and aggregate speed curves for the last five minutes.
+- Remove tasks with a choice to keep files, delete incomplete files, or delete all task files.
+- Close to the system tray and continue downloading in the background.
 - Right-click to copy magnet links, original sources, names, or save paths, and open download folders.
 - Double-click a task name or press **Space** to pause/resume. **Delete** opens a removal confirmation.
 - Persistent default directory, global speed limits, and connection limit settings.
@@ -46,9 +50,19 @@ The repository includes source and application assets only. Executables, downloa
 
 Open **Settings** to choose the default download folder and speed limits. `0` means unlimited. Speed limits apply immediately; the connection limit applies after restarting. The default folder affects new tasks only and does not move existing files.
 
-The default upload limit is **512 KiB/s**. Finished tasks continue seeding until paused. Closing the window saves state and stops the engine. Removing a task preserves downloaded files.
+The default upload limit is **512 KiB/s**. Finished BitTorrent tasks continue seeding until paused. By default, closing the window hides Flow in the system tray and downloads continue. Double-click the tray icon to restore the window; choose **Exit and stop downloads** from its menu to stop the engine. Disable **Background downloading on close** in Settings to exit when closing the window.
+
+Removal defaults to keeping files. You can instead delete incomplete files (including HTTP partial files), or all files owned by the task. File deletion is permanent and does not use the Recycle Bin; unrelated files and directories are retained.
+
+For selective torrent downloads, enable **Pause after adding**, wait for metadata, then select files in the **Files** tab and apply before resuming. Shared torrent pieces may write some bytes to deselected files.
+
+HTTP links must point directly to a file, rather than a sharing webpage. Partial data is stored beside the destination as `.flow-<id>.part`; output names include a short task ID to avoid collisions. Safe resume requires server range support and an ETag or Last-Modified validator. If the server ignores the range request or no validator is available, the download restarts from the beginning. BT and HTTP downloads share the global download limit.
+
+The **Speed curves** tab shows the current task or all tasks. Samples cover up to five minutes in the current app session and are not saved across restarts.
 
 To reuse another client's files, add the matching torrent and choose the original save directory. Flow verifies existing data before continuing. Verification progress is distinguished from download progress; another engine's resume file cannot replace verification.
+
+To upgrade, exit Flow through the tray menu, replace `Flow.exe`, and retain `data/` and your download folders.
 
 ## Tracker resilience
 
@@ -76,6 +90,7 @@ Runtime data lives in `data/` beside the executable:
 | `tasks-rust.json` | Task catalog and Tracker history |
 | `tracker-sources.json` / `tracker-cache.json` | Subscription settings, cached lists, and retry state |
 | `dht.json` | DHT routing state |
+| `<task-id>.http.json` | HTTP transfer and resume state |
 | `rqbit/` | Engine sessions and fast-resume state |
 | `status.json` / `events-rust.jsonl` | Local status and diagnostics |
 
@@ -88,6 +103,9 @@ To move an installation, copy the executable and `data/` together and keep the r
 | `src/main.rs` | Desktop interface and interactions |
 | `src/backend.rs` | Embedded backend lifecycle |
 | `src/engine.rs` | Download sessions, tasks, persistence, and local API |
+| `src/http_download.rs` | HTTP transfers and validated resume |
+| `src/file_ops.rs` | Scoped file deletion |
+| `src/tray.rs` | Windows tray and background lifecycle |
 | `src/trackers.rs` | Scrape queries and scoring |
 | `src/subscriptions.rs` | Sources, mirrors, cache, and retry policy |
 | `src/settings.rs` | Transfer settings and validation |
@@ -95,6 +113,6 @@ To move an installation, copy the executable and `data/` together and keep the r
 
 ## Current limitations
 
-Flow is an early desktop implementation. HTTP direct downloads, per-file download selection, speed charts, automatic application updates, and persistent theme selection are not implemented. Applying new Tracker candidates requires verification. Statistics that librqbit does not reliably expose, such as connected complete seeders and distributed availability, are shown as unknown.
+Flow is an early desktop implementation. Automatic application updates and persistent theme selection are not implemented. HTTP downloads use one connection per task and do not provide browser login/cookie integration or Content-Disposition filename extraction. Magnet metadata still requires reachable peers; adding Trackers cannot guarantee resolution. Applying new Tracker candidates requires verification. Statistics that librqbit does not reliably expose, such as connected complete seeders and distributed availability, are shown as unknown.
 
 Built with [egui](https://github.com/emilk/egui) and [librqbit](https://github.com/ikatson/rqbit).

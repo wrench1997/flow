@@ -2,6 +2,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default = "background_default")]
+    pub background_on_close: bool,
     pub download_dir: String,
     pub download_kib: u32,
     pub upload_kib: u32,
@@ -10,6 +12,7 @@ pub struct Settings {
 impl Settings {
     pub fn defaults(root: &std::path::Path) -> Self {
         Self {
+            background_on_close: true,
             download_dir: root.join("downloads").display().to_string(),
             download_kib: 0,
             upload_kib: 512,
@@ -28,4 +31,7 @@ impl Settings {
         );
         Ok(())
     }
+}
+fn background_default() -> bool {
+    true
 }
