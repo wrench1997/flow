@@ -1,0 +1,98 @@
+# Flow 下载工作台
+
+**基于 Rust、egui 和 librqbit 的 Windows BitTorrent 下载软件。**
+
+[English](README.md) · 简体中文
+
+<img src="assets/flow-icon.png" alt="Flow 图标" width="112" />
+
+双击一个程序即可同时启动桌面界面和内置下载引擎，不需要安装 Python 或单独启动后端服务。
+
+## 功能
+
+- 磁力链接、本机 `.torrent` 文件，以及原生文件和文件夹选择器。
+- 紧凑的任务列表，支持搜索、状态筛选、文件进度、对等连接和诊断日志。
+- 暂停/继续、校验已有文件、删除任务并保留下载文件。
+- 右键复制磁力链接、原始来源、名称、保存路径，或打开下载目录。
+- 双击任务名称或按 **空格** 切换暂停/继续；**Delete** 打开删除确认。
+- 持久化保存默认目录、全局限速和连接数配置。
+- 可编辑 Tracker 订阅、镜像切换、本地缓存、失败退避及定期健康检查。
+- 按当前资源查询 Tracker 统计和评分，支持 DHT 节点持久化及引擎会话保存。
+- 浅色/深色外观，内嵌多尺寸应用图标。
+
+## 构建与运行
+
+当前支持的桌面目标为 **Windows x64（MSVC）**。源码构建需要 Rust/Cargo，以及包含 Windows SDK 的 Visual Studio C++ 构建工具。
+
+```powershell
+git clone https://github.com/wrench1997/flow.git
+cd flow
+.\build-portable.ps1
+.\Flow.exe
+```
+
+脚本会在项目根目录生成 `Flow.exe`，平时直接双击即可。`start.cmd` / `start.ps1` 是先构建再运行的开发快捷入口。
+
+```powershell
+cargo test --release --locked
+cargo fmt --check
+```
+
+仓库仅包含源码和应用素材，**不包含可执行文件、下载内容、本机任务状态、缓存或临时文件**。Windows 版本静态链接 C/C++ 运行库，使用成品无需安装 Python、Rust 或单独的 Visual C++ 运行库。
+
+## 设置与操作
+
+顶部“设置”可修改默认目录和限速。`0` 表示不限速；限速立即生效，连接上限重启后生效。默认目录仅影响新任务，不会移动已有文件。
+
+默认上传上限为 **512 KiB/s**。完成后继续做种，暂停可停止上传。关闭窗口会保存状态并停止引擎。删除任务会保留下载文件。
+
+复用其他下载器的数据时，请使用匹配的种子和原保存目录。Flow 先校验再续传，并区分校验进度与下载进度；其他引擎的续传文件不能代替校验。
+
+## Tracker 发现与容错
+
+Flow 保留种子原有 Tracker，默认订阅 [XIU2](https://github.com/XIU2/TrackersListCollection) 和 [ngosang](https://github.com/ngosang/trackerslist) 的公开列表。这些项目提供地址目录，具体 Tracker 由不同运营者维护。
+
+在 **Tracker → 订阅设置** 中可添加、编辑、停用或删除来源。每个来源支持最多五个 HTTP/HTTPS 镜像，按顺序尝试。全部失败或返回无效、空列表时，保留上次成功缓存。
+
+- 默认每 **24 小时**更新列表，每 **30 分钟**检查未暂停任务，两项间隔均可调整。
+- 失败后按指数退避延长重试间隔，最长 **6 小时**。
+- 每个任务最多 **200 个 Tracker**，全局同时查询 **12 个**，单请求 **8 秒**超时。
+- HTTP/UDP scrape 查询使用当前资源哈希，按查询历史、报告做种数和响应耗时评分。
+- 私有种子不参与公开 Tracker 发现。
+
+**后台维护只更新候选和评分，不会重启下载。** 新候选需要点击“应用候选”，目前该操作会重新加载任务并校验已有文件。
+
+scrape 失败不代表 Tracker 无法返回下载来源。报告做种数不等于已连接人数，高评分不保证更快。公开种子还可通过 DHT 寻找来源，但没有可访问的用户持有所缺数据时，无法凭空补齐内容。
+
+## 本地数据与迁移
+
+运行数据保存在可执行文件旁的 `data/`：
+
+| 路径 | 用途 |
+| --- | --- |
+| `settings.json` | 默认目录与传输设置 |
+| `tasks-rust.json` | 任务目录和 Tracker 查询历史 |
+| `tracker-sources.json` / `tracker-cache.json` | 订阅设置、列表缓存及重试状态 |
+| `dht.json` | DHT 路由节点状态 |
+| `rqbit/` | 引擎会话及续传状态 |
+| `status.json` / `events-rust.jsonl` | 本机状态和诊断日志 |
+
+迁移软件时一起复制 exe 与 `data/`，并确保原下载路径仍可访问。本机 API 使用随机环回端口和每次启动生成的 Bearer token；目录锁防止多个引擎同时使用同一状态目录。
+
+## 项目结构
+
+| 路径 | 职责 |
+| --- | --- |
+| `src/main.rs` | 桌面界面与操作 |
+| `src/backend.rs` | 内置后端生命周期 |
+| `src/engine.rs` | 下载会话、任务、持久化和本机 API |
+| `src/trackers.rs` | scrape 查询与评分 |
+| `src/subscriptions.rs` | 订阅、镜像、缓存与重试策略 |
+| `src/settings.rs` | 下载设置及校验 |
+| `assets/`、`build.rs` | 图标和 Windows 资源嵌入 |
+
+## 当前限制
+
+Flow 处于早期开发阶段，尚未实现 HTTP 直链下载、文件选择下载、速度曲线、软件自动更新和主题跨启动保存。应用新 Tracker 候选需要校验文件。对于 librqbit 未提供可靠数据的已连接完整做种者数、分布式资源可用率，界面显示未知。
+
+基于 [egui](https://github.com/emilk/egui) 和 [librqbit](https://github.com/ikatson/rqbit) 构建。

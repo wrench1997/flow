@@ -1,0 +1,947 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
+mod backend;
+mod engine;
+mod settings;
+mod subscriptions;
+mod trackers;
+
+use eframe::egui::{self, Color32, RichText};
+use serde_json::{Value, json};
+use std::{sync::mpsc, thread, time::Duration};
+
+enum Command {
+    Select(String),
+    Post(&'static str, Value),
+}
+enum Event {
+    State(Value),
+    Error(String),
+    Done,
+}
+
+struct DownloadApp {
+    pending_action: bool,
+    settings_edit: Option<settings::Settings>,
+    subscription_edit: Option<subscriptions::Config>,
+    tx: mpsc::Sender<Command>,
+    rx: mpsc::Receiver<Event>,
+    state: Value,
+    selected: String,
+    filter: usize,
+    tab: usize,
+    search: String,
+    source: String,
+    save_path: String,
+    trackers: String,
+    add_open: bool,
+    tracker_open: bool,
+    remove_open: bool,
+    dark: bool,
+    connected: bool,
+    message: String,
+}
+
+fn text(v: &Value, key: &str) -> String {
+    v[key].as_str().unwrap_or("").to_owned()
+}
+fn num(v: &Value, key: &str) -> f64 {
+    v[key].as_f64().unwrap_or(0.0)
+}
+fn bytes(mut n: f64) -> String {
+    n = n.abs();
+    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut i = 0;
+    while n >= 1024.0 && i < 4 {
+        n /= 1024.0;
+        i += 1;
+    }
+    format!("{n:.1} {}", units[i])
+}
+fn list(v: &Value) -> Vec<Value> {
+    v.as_array().cloned().unwrap_or_default()
+}
+fn task_progress(ui: &mut egui::Ui, task: &Value) {
+    let progress = num(task, "progress").clamp(0.0, 1.0) as f32;
+    let checking = text(task, "state") == "checking";
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(150.0, 28.0), egui::Sense::hover());
+    let track = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.center().y - 3.0),
+        egui::vec2(94.0, 6.0),
+    );
+    let background = if ui.visuals().dark_mode {
+        Color32::from_rgb(58, 66, 76)
+    } else {
+        Color32::from_rgb(222, 228, 234)
+    };
+    let color = if !text(task, "error").is_empty() {
+        Color32::from_rgb(208, 89, 89)
+    } else if task["paused"] == true {
+        Color32::from_rgb(138, 149, 163)
+    } else {
+        Color32::from_rgb(24, 157, 140)
+    };
+    ui.painter().rect_filled(track, 3.0, background);
+    if progress > 0.0 {
+        let fill = egui::Rect::from_min_size(
+            track.min,
+            egui::vec2(track.width() * progress, track.height()),
+        );
+        ui.painter().rect_filled(fill, 3.0, color);
+    }
+    ui.painter().text(
+        egui::pos2(rect.right(), rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        if checking {
+            "校验中".into()
+        } else {
+            format!("{:.1}%", progress * 100.0)
+        },
+        egui::FontId::proportional(12.0),
+        ui.visuals().text_color(),
+    );
+    response.on_hover_text(text(task, "diagnosis"));
+}
+fn status(t: &Value) -> &str {
+    if !text(t, "error").is_empty() {
+        "错误"
+    } else if t["paused"].as_bool().unwrap_or(false) {
+        "已暂停"
+    } else if num(t, "progress") >= 1.0 {
+        "做种中"
+    } else if text(t, "state").contains("checking") {
+        "校验中"
+    } else if num(t, "download_rate") > 0.0 {
+        "下载中"
+    } else {
+        "等待来源"
+    }
+}
+
+impl DownloadApp {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        base: String,
+        token: String,
+        root: std::path::PathBuf,
+        startup_error: String,
+    ) -> Self {
+        let mut fonts = egui::FontDefinitions::default();
+        for path in ["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf"] {
+            if let Ok(data) = std::fs::read(path) {
+                fonts
+                    .font_data
+                    .insert("chinese".into(), egui::FontData::from_owned(data).into());
+                fonts
+                    .families
+                    .get_mut(&egui::FontFamily::Proportional)
+                    .unwrap()
+                    .insert(0, "chinese".into());
+                fonts
+                    .families
+                    .get_mut(&egui::FontFamily::Monospace)
+                    .unwrap()
+                    .push("chinese".into());
+                break;
+            }
+        }
+        cc.egui_ctx.set_fonts(fonts);
+        cc.egui_ctx.set_visuals(egui::Visuals::light());
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.spacing.item_spacing = egui::vec2(8.0, 7.0);
+        cc.egui_ctx.set_style(style);
+        let (tx, commands) = mpsc::channel();
+        let (events, rx) = mpsc::channel();
+        let ctx = cc.egui_ctx.clone();
+        thread::spawn(move || {
+            if !startup_error.is_empty() {
+                let _ = events.send(Event::Error(startup_error));
+                ctx.request_repaint();
+                return;
+            }
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(4))
+                .no_proxy()
+                .build()
+                .unwrap();
+            let mut selected = String::new();
+            loop {
+                match commands.recv_timeout(Duration::from_millis(800)) {
+                    Ok(Command::Select(id)) => selected = id,
+                    Ok(Command::Post(path, data)) => {
+                        let result = client
+                            .post(format!("{base}{path}"))
+                            .bearer_auth(&token)
+                            .json(&data)
+                            .send()
+                            .and_then(|r| r.json::<Value>());
+                        match result {
+                            Ok(v) if v.get("error").is_none() => {
+                                let _ = events.send(Event::Done);
+                            }
+                            Ok(v) => {
+                                let _ = events.send(Event::Error(text(&v, "error")));
+                            }
+                            Err(e) => {
+                                let _ = events.send(Event::Error(e.to_string()));
+                            }
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let response = client
+                    .get(format!("{base}/api/state"))
+                    .query(&[("selected", &selected)])
+                    .bearer_auth(&token)
+                    .send()
+                    .and_then(|r| r.error_for_status())
+                    .and_then(|r| r.json::<Value>());
+                let event = match response {
+                    Ok(state) => Event::State(state),
+                    Err(e) => {
+                        Event::Error(format!("内置引擎连接失败，请查看启动错误或重启 Flow。{e}"))
+                    }
+                };
+                if events.send(event).is_err() {
+                    break;
+                }
+                ctx.request_repaint();
+            }
+        });
+        Self {
+            pending_action: false,
+            settings_edit: None,
+            subscription_edit: None,
+            tx,
+            rx,
+            state: json!({}),
+            selected: String::new(),
+            filter: 0,
+            tab: 0,
+            search: String::new(),
+            source: String::new(),
+            save_path: root.join("downloads").display().to_string(),
+            trackers: String::new(),
+            add_open: false,
+            tracker_open: false,
+            remove_open: false,
+            dark: false,
+            connected: false,
+            message: String::new(),
+        }
+    }
+
+    fn action(&mut self, action: &str) {
+        if self.pending_action {
+            return;
+        }
+        self.pending_action = true;
+        let _ = self.tx.send(Command::Post(
+            "/api/action",
+            json!({"id":self.selected,"action":action}),
+        ));
+    }
+
+    fn new_task(&mut self) {
+        if let Some(path) = self.state["settings"]["download_dir"].as_str() {
+            self.save_path = path.into();
+        }
+        self.add_open = true;
+    }
+
+    fn details(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for (i, label) in ["概览", "文件", "Tracker", "对等连接", "诊断日志"]
+                .iter()
+                .enumerate()
+            {
+                ui.selectable_value(&mut self.tab, i, *label);
+            }
+        });
+        ui.separator();
+        egui::ScrollArea::both().id_salt("details_scroll").show(ui, |ui| {
+            let task = list(&self.state["tasks"]).into_iter().find(|t| text(t, "id") == self.selected);
+            if self.tab == 4 {
+                if ui.button("复制当前诊断 JSON").clicked() {
+                    ui.ctx().copy_text(serde_json::to_string_pretty(&self.state).unwrap_or_default());
+                    self.message = "诊断已复制到剪贴板（包含本机路径和对等连接地址）".into();
+                }
+                egui::Grid::new("events").striped(true).num_columns(3).show(ui, |ui| {
+                    for e in list(&self.state["events"]).iter().rev().filter(|e| self.selected.is_empty() || text(e,"task").is_empty() || text(e,"task") == self.selected).take(150) {
+                        ui.label(text(e, "time"));
+                        ui.colored_label(if text(e,"level") == "error" {Color32::from_rgb(205,65,65)} else {ui.visuals().text_color()}, text(e,"level"));
+                        ui.label(text(e, "message")); ui.end_row();
+                    }
+                });
+            } else if let Some(t) = task {
+                match self.tab {
+                    0 => {
+                        ui.label(RichText::new(text(&t,"name")).strong().size(17.0));
+                        ui.add_space(6.0);
+                        ui.colored_label(if text(&t, "error").is_empty() { Color32::from_rgb(36,140,125) } else { Color32::from_rgb(208,89,89) }, text(&t,"diagnosis"));
+                        ui.add_space(8.0);
+                        egui::Grid::new("overview").num_columns(4).spacing([24.0, 10.0]).show(ui, |ui| {
+                            for (a,b,c,d) in [
+                                ("已完成", bytes(num(&t,"done")), "总大小", bytes(num(&t,"total"))),
+                                ("下载速度", format!("{}/s",bytes(num(&t,"download_rate"))), "上传速度", format!("{}/s",bytes(num(&t,"upload_rate")))),
+                                ("已连接用户", format!("{:.0}",num(&t,"peers")), "已连接做种者", if t["seeds"].is_number(){format!("{:.0}",num(&t,"seeds"))}else{"未知".into()}),
+                                ("资源可用率", if num(&t,"availability") < 0.0 {"未知".into()} else {format!("{:.3}",num(&t,"availability"))}, "引擎状态", text(&t,"state")),
+                            ] { ui.weak(a); ui.label(b); ui.weak(c); ui.label(d); ui.end_row(); }
+                        });
+                        ui.add_space(12.0);
+                        ui.label(format!("保存位置：{}",text(&t,"save_path")));
+                        ui.weak("完成后继续做种，暂停可停止上传。未知指标表示引擎没有公开该数据；Tracker 做种统计可在 Tracker 页查看。");
+                    }
+                    1 => {
+                        egui::Grid::new("files").striped(true).num_columns(3).min_col_width(100.0).show(ui, |ui| {
+                            ui.strong("文件路径"); ui.strong("大小"); ui.strong("完成度"); ui.end_row();
+                            for f in list(&self.state["detail"]["files"]) {
+                                ui.label(text(&f,"path")); ui.label(bytes(num(&f,"size")));
+                                ui.label(format!("{:.1}%", if num(&f,"size") == 0.0 {100.0} else {num(&f,"done")/num(&f,"size")*100.0})); ui.end_row();
+                            }
+                        });
+                    }
+                    2 => {
+                        ui.horizontal(|ui| {
+                            let running = self.state["detail"]["discovery"]["running"].as_bool().unwrap_or(false);
+                            if ui.add_enabled(!running, egui::Button::new(if running {"正在发现…"} else {"智能发现与评分"})).clicked() {self.action("discover");}
+                            if ui.button("添加 Tracker…").clicked() {self.tracker_open = true;}
+                            if ui.button("订阅设置…").clicked() {
+                                self.subscription_edit = serde_json::from_value(self.state["subscriptions"]["config"].clone()).ok();
+                            }
+                            if ui.button("重新查询").clicked() {self.action("announce");}
+                            if ui.button("应用候选（重新校验）").clicked() {self.action("apply_trackers");}
+                        });
+                        ui.label(text(&self.state["detail"]["discovery"], "message"));
+                        ui.weak("按当前资源 scrape 查询评分 · 做种数为服务器报告，非已连接人数 · 查询失败不等于不能下载 · — 表示无新鲜样本");
+                        egui::Grid::new("trackers").striped(true).num_columns(8).show(ui, |ui| {
+                            for title in ["评分", "Tracker 地址", "报告做种数", "响应耗时", "成功 / 失败", "来源", "状态", "响应 / 错误原因"] {ui.strong(title);} ui.end_row();
+                            for t in list(&self.state["detail"]["trackers"]) {
+                                ui.label(if t["score"].is_number() {format!("{:.1}",num(&t,"score"))} else {"—".into()});
+                                ui.label(text(&t,"url"));
+                                ui.label(if t["seeders"].is_number() {format!("{:.0}",num(&t,"seeders"))} else {"—".into()});
+                                ui.label(if t["latency_ms"].is_number() {format!("{:.0} ms",num(&t,"latency_ms"))} else {"—".into()});
+                                ui.label(format!("{:.0} / {:.0}",num(&t,"successes"),num(&t,"failures")));
+                                ui.label(text(&t,"source")); ui.label(text(&t,"status")); ui.label(text(&t,"message")); ui.end_row();
+                            }
+                        });
+                    }
+                    3 => {
+                        egui::Grid::new("peers").striped(true).num_columns(4).min_col_width(120.0).show(ui, |ui| {
+                            for h in ["地址", "客户端", "累计接收", "连接状态"] {ui.strong(h);} ui.end_row();
+                            for p in list(&self.state["detail"]["peers"]) {
+                                ui.label(text(&p,"address")); ui.label(text(&p,"client"));
+                                ui.label(bytes(num(&p,"downloaded")));
+                                ui.label(text(&p,"state")); ui.end_row();
+                            }
+                        });
+                    }
+                    _ => {}
+                }
+            } else {ui.weak("选择一个任务，查看文件、Tracker 和连接详情。");}
+        });
+    }
+}
+
+impl eframe::App for DownloadApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        while let Ok(event) = self.rx.try_recv() {
+            match event {
+                Event::State(v) => {
+                    self.state = v;
+                    self.connected = true;
+                }
+                Event::Error(e) => {
+                    self.pending_action = false;
+                    if e.starts_with("内置引擎连接失败") {
+                        self.connected = false;
+                    }
+                    self.message = e;
+                }
+                Event::Done => {
+                    self.pending_action = false;
+                    self.message = "操作成功".into();
+                }
+            }
+        }
+        let tasks = list(&self.state["tasks"]);
+        if self.selected.is_empty() && !tasks.is_empty() {
+            self.selected = text(&tasks[0], "id");
+            let _ = self.tx.send(Command::Select(self.selected.clone()));
+        }
+        let has_selection = tasks.iter().any(|t| text(t, "id") == self.selected);
+        let selected_task = tasks.iter().find(|t| text(t, "id") == self.selected);
+        let can_resume = !self.pending_action
+            && selected_task.is_some_and(|t| t["paused"] == true || !text(t, "error").is_empty());
+        let can_pause = !self.pending_action
+            && selected_task.is_some_and(|t| {
+                t["paused"] != true
+                    && text(t, "error").is_empty()
+                    && text(t, "state") != "checking"
+                    && text(t, "state") != "loading"
+            });
+        if has_selection
+            && !ctx.wants_keyboard_input()
+            && !self.add_open
+            && !self.remove_open
+            && self.settings_edit.is_none()
+            && self.subscription_edit.is_none()
+            && !self.tracker_open
+        {
+            if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+                self.remove_open = true;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                if can_resume {
+                    self.action("resume");
+                } else if can_pause {
+                    self.action("pause");
+                }
+            }
+        }
+        if !has_selection && !self.selected.is_empty() {
+            self.selected.clear();
+            let _ = self.tx.send(Command::Select(String::new()));
+        }
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("FLOW")
+                        .strong()
+                        .size(23.0)
+                        .color(Color32::from_rgb(24, 147, 127)),
+                );
+                ui.weak("下载工作台");
+                ui.separator();
+                if ui
+                    .add_enabled(self.connected, egui::Button::new("＋ 新建任务"))
+                    .clicked()
+                {
+                    self.new_task();
+                }
+                ui.add_enabled_ui(self.connected && has_selection, |ui| {
+                    if ui
+                        .add_enabled(can_resume, egui::Button::new("▶ 继续"))
+                        .clicked()
+                    {
+                        self.action("resume");
+                    }
+                    if ui
+                        .add_enabled(can_pause, egui::Button::new("Ⅱ 暂停"))
+                        .clicked()
+                    {
+                        self.action("pause");
+                    }
+                    if ui.button("校验文件").clicked() {
+                        self.action("recheck");
+                    }
+                    if ui.button("移除任务").clicked() {
+                        self.remove_open = true;
+                    }
+                });
+                if ui
+                    .add_enabled(self.connected, egui::Button::new("设置…"))
+                    .clicked()
+                {
+                    self.settings_edit =
+                        serde_json::from_value(self.state["settings"].clone()).ok();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.checkbox(&mut self.dark, "深色").changed() {
+                        ctx.set_visuals(if self.dark {
+                            egui::Visuals::dark()
+                        } else {
+                            egui::Visuals::light()
+                        });
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.search)
+                            .hint_text("搜索任务…")
+                            .desired_width(160.0),
+                    );
+                });
+            });
+            ui.add_space(5.0);
+        });
+        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    if self.connected {
+                        Color32::from_rgb(24, 147, 127)
+                    } else {
+                        Color32::from_rgb(210, 90, 60)
+                    },
+                    if self.connected {
+                        "● 引擎已连接"
+                    } else {
+                        "● 引擎未连接"
+                    },
+                );
+                ui.separator();
+                ui.label(text(&self.state, "engine"));
+                ui.separator();
+                ui.label(format!(
+                    "↓ {}/s",
+                    bytes(tasks.iter().map(|t| num(t, "download_rate")).sum())
+                ));
+                ui.label(format!(
+                    "↑ {}/s",
+                    bytes(tasks.iter().map(|t| num(t, "upload_rate")).sum())
+                ));
+                ui.separator();
+                ui.weak(format!("监听端口 {}", num(&self.state, "listen_port")));
+            });
+            if !self.message.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label(&self.message);
+                    if ui.small_button("清除").clicked() {
+                        self.message.clear();
+                    }
+                });
+            }
+        });
+        egui::SidePanel::left("sidebar")
+            .exact_width(155.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.add_space(12.0);
+                ui.weak("任务分类");
+                ui.add_space(8.0);
+                for (i, label) in ["全部任务", "下载中", "已暂停", "已完成", "错误"]
+                    .iter()
+                    .enumerate()
+                {
+                    let count = tasks.iter().filter(|t| matches_filter(t, i)).count();
+                    ui.selectable_value(&mut self.filter, i, format!("{label}    {count}"));
+                    ui.add_space(4.0);
+                }
+                ui.separator();
+                ui.weak("本机下载引擎");
+                ui.label("BitTorrent / Magnet");
+                ui.add_space(12.0);
+                ui.weak(
+                    "自动保存续传状态\n移除任务保留文件\n右键任务：更多操作\n空格：暂停 / 继续",
+                );
+            });
+        egui::TopBottomPanel::bottom("detail_panel")
+            .resizable(true)
+            .default_height(290.0)
+            .min_height(120.0)
+            .show(ctx, |ui| self.details(ui));
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading(["全部任务", "下载中", "已暂停", "已完成", "错误"][self.filter]);
+                ui.weak(format!("{} 个任务", tasks.len()));
+            });
+            ui.add_space(6.0);
+            if tasks.is_empty() {
+                ui.add_space(55.0);
+                ui.vertical_centered(|ui| {
+                    ui.heading("从一个下载任务开始");
+                    ui.add_space(8.0);
+                    ui.weak("添加磁力链接或本机种子文件，实时查看下载进度与连接诊断。");
+                    ui.add_space(15.0);
+                    if ui
+                        .add_enabled(
+                            self.connected,
+                            egui::Button::new("＋ 新建下载任务").min_size(egui::vec2(160.0, 36.0)),
+                        )
+                        .clicked()
+                    {
+                        self.add_open = true;
+                    }
+                    ui.add_space(12.0);
+                    ui.weak("续传已有文件时，将保存目录设为原下载的根目录。");
+                });
+            } else {
+                egui::ScrollArea::both()
+                    .id_salt("tasks_scroll")
+                    .show(ui, |ui| {
+                        egui::Grid::new("task_table")
+                            .striped(true)
+                            .num_columns(9)
+                            .spacing([16.0, 5.0])
+                            .show(ui, |ui| {
+                                for title in [
+                                    "名称",
+                                    "大小",
+                                    "进度",
+                                    "状态",
+                                    "下载速度",
+                                    "上传速度",
+                                    "连接",
+                                    "做种",
+                                    "可用率",
+                                ] {
+                                    ui.strong(title);
+                                }
+                                ui.end_row();
+                                let filter = self.filter;
+                                let search = self.search.to_lowercase();
+                                for t in tasks.iter().filter(|t| {
+                                    matches_filter(t, filter)
+                                        && text(t, "name").to_lowercase().contains(&search)
+                                }) {
+                                    let id = text(t, "id");
+                                    let response = ui
+                                        .add_sized(
+                                            [310.0, 28.0],
+                                            egui::Button::new(text(t, "name"))
+                                                .selected(self.selected == id)
+                                                .frame(false)
+                                                .truncate(),
+                                        )
+                                        .on_hover_text(text(t, "name"));
+                                    if response.clicked() || response.secondary_clicked() {
+                                        self.selected = id.clone();
+                                        self.state["detail"] = json!({});
+                                        let _ = self.tx.send(Command::Select(id.clone()));
+                                    }
+                                    let resumable =
+                                        t["paused"] == true || !text(t, "error").is_empty();
+                                    let pausable = t["paused"] != true
+                                        && text(t, "error").is_empty()
+                                        && !matches!(
+                                            text(t, "state").as_str(),
+                                            "loading" | "checking"
+                                        );
+                                    if response.double_clicked() {
+                                        if resumable {
+                                            self.action("resume");
+                                        } else if pausable {
+                                            self.action("pause");
+                                        }
+                                    }
+                                    response.context_menu(|ui| {
+                                        if ui
+                                            .add_enabled(
+                                                resumable || pausable,
+                                                egui::Button::new(if resumable {
+                                                    "继续下载"
+                                                } else {
+                                                    "暂停任务"
+                                                }),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.action(if resumable { "resume" } else { "pause" });
+                                            ui.close();
+                                        }
+                                        ui.separator();
+                                        if ui
+                                            .add_enabled(
+                                                !text(t, "magnet").is_empty(),
+                                                egui::Button::new("复制磁力链接"),
+                                            )
+                                            .clicked()
+                                        {
+                                            ui.ctx().copy_text(text(t, "magnet"));
+                                            ui.close();
+                                        }
+                                        if ui.button("复制原始链接 / 种子路径").clicked()
+                                        {
+                                            ui.ctx().copy_text(text(t, "source"));
+                                            ui.close();
+                                        }
+                                        if ui.button("复制名称").clicked() {
+                                            ui.ctx().copy_text(text(t, "name"));
+                                            ui.close();
+                                        }
+                                        if ui.button("复制保存路径").clicked() {
+                                            ui.ctx().copy_text(text(t, "save_path"));
+                                            ui.close();
+                                        }
+                                        if ui.button("打开保存目录").clicked() {
+                                            match std::process::Command::new("explorer.exe")
+                                                .arg(text(t, "save_path"))
+                                                .spawn()
+                                            {
+                                                Ok(_) => {}
+                                                Err(e) => {
+                                                    self.message = format!("无法打开目录：{e}")
+                                                }
+                                            }
+                                            ui.close();
+                                        }
+                                        ui.separator();
+                                        if ui.button("校验文件").clicked() {
+                                            self.action("recheck");
+                                            ui.close();
+                                        }
+                                        if ui.button("删除任务（保留文件）…").clicked()
+                                        {
+                                            self.remove_open = true;
+                                            ui.close();
+                                        }
+                                    });
+                                    ui.label(bytes(num(t, "total")));
+                                    task_progress(ui, t);
+                                    ui.label(status(t));
+                                    ui.label(format!("{}/s", bytes(num(t, "download_rate"))));
+                                    ui.label(format!("{}/s", bytes(num(t, "upload_rate"))));
+                                    ui.label(format!("{:.0}", num(t, "peers")));
+                                    ui.label(if t["seeds"].is_number() {
+                                        format!("{:.0}", num(t, "seeds"))
+                                    } else {
+                                        "—".into()
+                                    });
+                                    ui.label(if num(t, "availability") < 0.0 {
+                                        "—".into()
+                                    } else {
+                                        format!("{:.2}", num(t, "availability"))
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+        });
+        if self.add_open {
+            let mut open = true;
+            egui::Window::new("新建下载任务")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .default_width(550.0)
+                .show(ctx, |ui| {
+                    ui.label("磁力链接 / 本机 .torrent 文件完整路径");
+                    if ui.button("选择种子文件…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("种子", &["torrent"])
+                            .pick_file()
+                        {
+                            self.source = path.display().to_string();
+                        }
+                    }
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.source)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.label("保存目录");
+                    if ui.button("浏览目录…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_directory(&self.save_path)
+                            .pick_folder()
+                        {
+                            self.save_path = path.display().to_string();
+                        }
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.save_path)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.weak("可复用已有下载：选择原保存目录后，引擎会校验已有数据。");
+                    ui.add_space(10.0);
+                    if ui
+                        .add_enabled(
+                            !self.source.trim().is_empty() && !self.save_path.trim().is_empty(),
+                            egui::Button::new("开始下载"),
+                        )
+                        .clicked()
+                    {
+                        let _ = self.tx.send(Command::Post(
+                            "/api/tasks",
+                            json!({"source":self.source,"save_path":self.save_path}),
+                        ));
+                        self.add_open = false;
+                    }
+                });
+            self.add_open &= open;
+        }
+        if self.tracker_open {
+            let mut open = true;
+            egui::Window::new("添加 Tracker").open(&mut open).default_width(550.0).show(ctx, |ui| {
+                ui.label("每行一个 http / https / udp 地址，最多 200 个");
+                ui.add(egui::TextEdit::multiline(&mut self.trackers).desired_rows(10).desired_width(f32::INFINITY));
+                if ui.button("保存候选").clicked() {
+                    let _ = self.tx.send(Command::Post("/api/action",json!({"id":self.selected,"action":"trackers","trackers":self.trackers})));
+                    self.tracker_open = false;
+                }
+            });
+            self.tracker_open &= open;
+        }
+        if self.remove_open {
+            let mut open = true;
+            egui::Window::new("移除任务")
+                .open(&mut open)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.label("将移除选中的下载任务，已下载的文件会保留。");
+                    if let Some(task) = tasks.iter().find(|t| text(t, "id") == self.selected) {
+                        ui.label(text(task, "name"));
+                    }
+                    if ui.button("确认移除，保留文件").clicked() {
+                        self.action("remove");
+                        self.remove_open = false;
+                    }
+                });
+            self.remove_open &= open;
+        }
+        if let Some(mut config) = self.settings_edit.take() {
+            let mut open = true;
+            let mut saved = false;
+            egui::Window::new("下载设置")
+                .open(&mut open)
+                .default_width(570.0)
+                .show(ctx, |ui| {
+                    ui.label("默认下载目录（仅影响新任务）");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut config.download_dir)
+                                .desired_width(430.0),
+                        );
+                        if ui.button("浏览…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_directory(&config.download_dir)
+                                .pick_folder()
+                            {
+                                config.download_dir = path.display().to_string();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    ui.label("全局限速，0 表示不限速；保存后立即生效。");
+                    ui.horizontal(|ui| {
+                        ui.label("下载 KiB/s");
+                        ui.add(egui::DragValue::new(&mut config.download_kib).range(0..=4_000_000));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("上传 KiB/s");
+                        ui.add(egui::DragValue::new(&mut config.upload_kib).range(0..=4_000_000));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("连接上限（重启后生效）");
+                        ui.add(egui::DragValue::new(&mut config.peer_limit).range(10..=2000));
+                    });
+                    if let Err(e) = config.validate() {
+                        ui.colored_label(Color32::from_rgb(208, 89, 89), e.to_string());
+                    }
+                    if ui
+                        .add_enabled(config.validate().is_ok(), egui::Button::new("保存设置"))
+                        .clicked()
+                    {
+                        let _ = self.tx.send(Command::Post(
+                            "/api/settings",
+                            serde_json::to_value(&config).unwrap(),
+                        ));
+                        saved = true;
+                    }
+                });
+            if open && !saved {
+                self.settings_edit = Some(config);
+            }
+        }
+        if let Some(mut config) = self.subscription_edit.take() {
+            let mut open = true;
+            let mut saved = false;
+            egui::Window::new("Tracker 订阅设置").open(&mut open).default_width(660.0).show(ctx, |ui| {
+                ui.label("同一来源的镜像按顺序尝试；全部失败时沿用缓存。");
+                ui.horizontal(|ui| {
+                    ui.label("列表更新（小时）"); ui.add(egui::DragValue::new(&mut config.refresh_hours).range(1..=168));
+                    ui.label("健康检查（分钟）"); ui.add(egui::DragValue::new(&mut config.health_minutes).range(5..=1440));
+                });
+                let mut remove = None;
+                egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                    for (index, source) in config.sources.iter_mut().enumerate() {
+                        ui.push_id(index, |ui| {
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut source.enabled, "启用");
+                                ui.text_edit_singleline(&mut source.name);
+                                if ui.small_button("移除订阅").clicked() { remove = Some(index); }
+                            });
+                            let mut urls = source.urls.join("\n");
+                            ui.label("镜像地址，每行一个");
+                            if ui.add(egui::TextEdit::multiline(&mut urls).desired_rows(3).desired_width(f32::INFINITY)).changed() {
+                                    source.urls = urls.split('\n').map(str::to_string).collect();
+                            }
+                        });
+                    }
+                });
+                if let Some(index) = remove { config.sources.remove(index); }
+                if config.sources.len() < 16 && ui.button("新增订阅源").clicked() {
+                    config.sources.push(subscriptions::Source { name: format!("自定义 {}", config.sources.len() + 1), enabled: true, urls: vec![String::new()] });
+                }
+                ui.weak("后台检查不会中断下载。新候选通过“应用候选”载入引擎；移除订阅不会删除任务原有 Tracker。");
+                if let Err(e) = config.validate() { ui.colored_label(Color32::from_rgb(208,89,89), e.to_string()); }
+                if ui.add_enabled(config.validate().is_ok(), egui::Button::new("保存设置")).clicked() {
+                    let _ = self.tx.send(Command::Post("/api/subscriptions", serde_json::to_value(&config).unwrap()));
+                    saved = true;
+                }
+            });
+            if open && !saved {
+                self.subscription_edit = Some(config);
+            }
+        }
+    }
+}
+
+fn matches_filter(t: &Value, filter: usize) -> bool {
+    match filter {
+        1 => {
+            num(t, "progress") < 1.0
+                && !t["paused"].as_bool().unwrap_or(false)
+                && text(t, "error").is_empty()
+        }
+        2 => t["paused"].as_bool().unwrap_or(false),
+        3 => num(t, "progress") >= 1.0,
+        4 => !text(t, "error").is_empty(),
+        _ => true,
+    }
+}
+
+fn main() -> eframe::Result {
+    let owned_backend = backend::Backend::start();
+    if std::env::args().any(|a| a == "--check-backend") {
+        let report = match &owned_backend {
+            Ok(b) => json!({"ok":true,"root":b.root,"engine":"librqbit 9.0.1","native_rust":true}),
+            Err(e) => json!({"ok":false,"error":e}),
+        };
+        let parent = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let _ = std::fs::write(
+            parent.join("self-check.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        );
+        drop(owned_backend);
+        if report["ok"] != true {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    let (base, token, root, error) = match &owned_backend {
+        Ok(b) => (
+            b.base.clone(),
+            b.token.clone(),
+            b.root.clone(),
+            String::new(),
+        ),
+        Err(e) => (
+            String::new(),
+            String::new(),
+            std::env::current_dir().unwrap_or_default(),
+            e.clone(),
+        ),
+    };
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/flow-icon.png"))
+                    .expect("embedded app icon"),
+            )
+            .with_inner_size([1320.0, 820.0])
+            .with_min_inner_size([1050.0, 650.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Flow · 下载工作台",
+        options,
+        Box::new(move |cc| Ok(Box::new(DownloadApp::new(cc, base, token, root, error)))),
+    )
+}
