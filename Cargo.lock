@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "flow-download"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1189,6 +1189,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "tray-icon",

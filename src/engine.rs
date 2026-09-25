@@ -383,7 +383,47 @@ impl Engine {
             e.error.clear();
             e.trackers = trackers;
         }
-        self.handles.lock().unwrap().insert(id.into(), handle);
+        self.handles
+            .lock()
+            .unwrap()
+            .insert(id.into(), handle.clone());
+        // Initialization captures its original start_paused value in librqbit.
+        // A resume during checking can otherwise finish in Paused with a false
+        // pause flag. Reconcile after transitions without holding the API lock
+        // while waiting for hashing/network work.
+        let weak = Arc::downgrade(self);
+        let task_id = id.to_owned();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let Some(engine) = weak.upgrade() else {
+                    break;
+                };
+                let _operation = engine.operations.lock().await;
+                let Ok(current) = engine.handle(&task_id) else {
+                    break;
+                };
+                if !Arc::ptr_eq(&current, &handle) {
+                    break;
+                }
+                let Ok(entry) = engine.entry(&task_id) else {
+                    break;
+                };
+                let state = handle.stats().state;
+                let result =
+                    if !entry.paused && matches!(state, librqbit::TorrentStatsState::Paused) {
+                        engine.session.unpause(&handle).await
+                    } else if entry.paused && matches!(state, librqbit::TorrentStatsState::Live) {
+                        engine.session.pause(&handle).await
+                    } else {
+                        continue;
+                    };
+                if let Err(error) = result {
+                    engine.error(&task_id, &format!("同步暂停状态失败：{error:#}"));
+                    break;
+                }
+            }
+        });
         self.persist()?;
         self.event(
             id,
@@ -529,6 +569,23 @@ impl Engine {
             );
             return Ok(());
         }
+        if action == "pause" && self.handle(id).is_err() {
+            // Metadata resolution may still finish, but load() re-reads this intent
+            // under the operation lock before creating a downloading handle.
+            let _operation = self.operations.lock().await;
+            if let Ok(h) = self.handle(id) {
+                if !h.is_paused() && !matches!(h.stats().state, librqbit::TorrentStatsState::Paused)
+                {
+                    self.session.pause(&h).await?;
+                }
+            }
+            if let Some(e) = self.entries.lock().unwrap().iter_mut().find(|e| e.id == id) {
+                e.paused = true;
+            }
+            self.persist()?;
+            self.event(id, "info", "pause", "任务已暂停");
+            return Ok(());
+        }
         if action == "resume" && self.handle(id).is_err() {
             if let Some(e) = self.entries.lock().unwrap().iter_mut().find(|e| e.id == id) {
                 e.paused = false;
@@ -550,11 +607,19 @@ impl Engine {
             "pause" | "resume" => {
                 let h = handle.context("任务正在解析，请等待后重试")?;
                 if action == "pause" {
-                    if !h.is_paused() {
+                    if !h.is_paused()
+                        && !matches!(h.stats().state, librqbit::TorrentStatsState::Paused)
+                    {
                         self.session.pause(&h).await?;
                     }
                 } else {
-                    if h.is_paused() {
+                    if h.is_paused()
+                        || matches!(
+                            h.stats().state,
+                            librqbit::TorrentStatsState::Paused
+                                | librqbit::TorrentStatsState::Error
+                        )
+                    {
                         self.session.unpause(&h).await?;
                     }
                 }
@@ -866,6 +931,10 @@ impl Engine {
             if let Some(job) = self.http_jobs.lock().unwrap().get(&e.id).cloned() {
                 let s = job.state.lock().unwrap().clone();
                 item["name"] = json!(s.name);
+                if crate::media::playable(&s.name) {
+                    item["media_files"] = json!([{"index":0,"path":s.name,"size":s.total,
+                        "source":if s.complete {job.destination.display().to_string()} else {e.source.clone()}}]);
+                }
                 item["done"] = json!(s.done);
                 item["total"] = json!(s.total.unwrap_or(0));
                 item["progress"] = json!(if s.complete {
@@ -953,6 +1022,10 @@ impl Engine {
                     })
                     .unwrap_or((0, 0, json!({})));
                 let live_peers = peers["live"].as_u64().unwrap_or(0);
+                // The engine may be paused even when the saved intent is running.
+                let actually_paused =
+                    h.is_paused() || matches!(stats.state, librqbit::TorrentStatsState::Paused);
+                item["paused"] = json!(actually_paused);
                 let ratio = if stats.total_bytes == 0 {
                     0.0
                 } else {
@@ -962,7 +1035,7 @@ impl Engine {
                     error.clone()
                 } else if initializing {
                     format!("校验已有文件 {:.1}%（不是下载完成度）", ratio * 100.0)
-                } else if e.paused {
+                } else if actually_paused {
                     "任务已暂停".into()
                 } else if stats.finished {
                     "下载完成，正在做种".into()
@@ -973,6 +1046,12 @@ impl Engine {
                 } else {
                     "已连接，等待可用数据".into()
                 };
+                if let Some(metadata) = h.metadata.load_full() {
+                    item["media_files"] = json!(metadata.file_infos.iter().enumerate()
+                        .filter(|(_,f)|crate::media::playable(&f.relative_filename.to_string_lossy()))
+                        .map(|(index,f)|json!({"index":index,"path":f.relative_filename.display().to_string(),"size":f.len}))
+                        .collect::<Vec<_>>());
+                }
                 item["name"] = json!(h.name().unwrap_or_else(|| e.source.clone()));
                 item["state"] = json!(if initializing {
                     "checking".to_string()
@@ -1093,6 +1172,87 @@ async fn action(State(s): State<ApiState>, Json(v): Json<Value>) -> Response {
     )
 }
 
+// Opening a stream does not silently resume a paused task. The explicit play
+// action selects its file and resumes first; GET/HEAD only read the stream.
+async fn prepare_play(State(s): State<ApiState>, Json(v): Json<Value>) -> Response {
+    reply(
+        async {
+            let id = v["id"].as_str().context("缺少任务编号")?;
+            let index = v["index"].as_u64().context("缺少文件编号")? as usize;
+            let h = s.engine.handle(id)?;
+            anyhow::ensure!(
+                !matches!(
+                    h.stats().state,
+                    librqbit::TorrentStatsState::Initializing { .. }
+                ),
+                "文件正在校验，请校验完成后播放"
+            );
+            h.with_metadata(|m| m.file_infos.get(index).map(|f| f.relative_filename.clone()))?
+                .context("文件编号无效")?;
+            if let Some(mut selected) = h.only_files() {
+                if !selected.contains(&index) {
+                    selected.push(index);
+                    s.engine.select_files(id, selected).await?;
+                }
+            }
+            s.engine.action(id, "resume", "").await?;
+            Ok(json!({"path":format!("/api/media/{id}/{index}")}))
+        }
+        .await,
+    )
+}
+
+async fn media_stream(
+    State(s): State<ApiState>,
+    axum::extract::Path((id, index)): axum::extract::Path<(String, usize)>,
+    headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+) -> Response {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let result = async {
+        let h = s.engine.handle(&id)?;
+        let mut stream = h.stream(index).await?;
+        let len = stream.len();
+        let request_range = match headers.get("range") {
+            Some(value) => Some(value.to_str().context("无效 Range 请求头")?),
+            None => None,
+        };
+        let (start, count, partial) = match crate::media::range(request_range, len) {
+            Ok(r) => r,
+            Err(()) => {
+                return Ok(Response::builder()
+                    .status(416)
+                    .header("Content-Range", format!("bytes */{len}"))
+                    .body(axum::body::Body::empty())?);
+            }
+        };
+        stream.seek(std::io::SeekFrom::Start(start)).await?;
+        let body = if method == axum::http::Method::HEAD {
+            axum::body::Body::empty()
+        } else {
+            axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(stream.take(count)))
+        };
+        let mut response = Response::builder()
+            .status(if partial { 206 } else { 200 })
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Type", "application/octet-stream")
+            .header("Content-Length", count)
+            .header("Cache-Control", "no-store");
+        if partial {
+            response = response.header(
+                "Content-Range",
+                format!("bytes {}-{}/{len}", start, start + count - 1),
+            );
+        }
+        Ok::<_, anyhow::Error>(response.body(body)?)
+    }
+    .await;
+    match result {
+        Ok(response) => response,
+        Err(e) => reply(Err(e)),
+    }
+}
+
 async fn subscriptions(
     State(s): State<ApiState>,
     Json(config): Json<crate::subscriptions::Config>,
@@ -1174,6 +1334,8 @@ pub async fn serve(
         .route("/api/subscriptions", post(subscriptions))
         .route("/api/settings", post(settings))
         .route("/api/files", post(select_files))
+        .route("/api/play", post(prepare_play))
+        .route("/api/media/{id}/{index}", get(media_stream))
         .layer(middleware::from_fn_with_state(state_data.clone(), auth))
         .with_state(state_data);
     let restore = engine.clone();
@@ -1243,14 +1405,14 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    async fn wait(mut predicate: impl FnMut() -> bool) {
+    async fn wait(stage: &str, mut predicate: impl FnMut() -> bool) {
         tokio::time::timeout(Duration::from_secs(30), async {
             while !predicate() {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await
-        .expect("engine condition timed out");
+        .unwrap_or_else(|_| panic!("engine condition timed out: {stage}"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1364,16 +1526,54 @@ mod tests {
                 .as_bool()
                 .unwrap()
         );
+        // Engine state wins over a stale catalog intent, and repeated pause is safe.
+        client
+            .entries
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|e| e.id == "local")
+            .unwrap()
+            .paused = false;
+        assert_eq!(client.snapshot("local")["tasks"][0]["paused"], true);
+        client.action("local", "pause", "").await.unwrap();
+        assert!(client.entry("local").unwrap().paused);
         client.action("local", "resume", "").await.unwrap();
         client.action("local", "resume", "").await.unwrap();
-        wait(|| client.handle("local").unwrap().stats().progress_bytes > 1024 * 1024).await;
+        wait("first data after restore", || {
+            client.handle("local").unwrap().stats().progress_bytes > 1024 * 1024
+        })
+        .await;
         client.action("local", "pause", "").await.unwrap();
         client.action("local", "pause", "").await.unwrap();
         assert!(client.handle("local").unwrap().is_paused());
         tokio::time::sleep(Duration::from_millis(250)).await;
         client.action("local", "resume", "").await.unwrap();
         let handle = client.handle("local").unwrap();
-        wait(|| handle.stats().finished).await;
+        // A demuxer can request the tail before the whole file finishes.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("range", "bytes=-4096".parse().unwrap());
+        let response = media_stream(
+            State(ApiState {
+                engine: client.clone(),
+                token: "fixture".into(),
+            }),
+            axum::extract::Path(("local".into(), selected_index)),
+            headers,
+            axum::http::Method::GET,
+        )
+        .await;
+        assert_eq!(response.status(), 206);
+        assert_eq!(response.headers()["content-length"], "4096");
+        let tail = tokio::time::timeout(
+            Duration::from_secs(30),
+            axum::body::to_bytes(response.into_body(), 4096),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&tail[..], &payload[payload.len() - 4096..]);
+        wait("finished transfer/check", || handle.stats().finished).await;
         assert_eq!(
             std::fs::read(existing.join("payload.bin")).unwrap(),
             payload
@@ -1385,7 +1585,7 @@ mod tests {
             && value == format!("urn:btih:{}", handle.info_hash().as_string())));
         client.action("local", "recheck", "").await.unwrap();
         let handle = client.handle("local").unwrap();
-        wait(|| handle.stats().finished).await;
+        wait("finished transfer/check", || handle.stats().finished).await;
         let neighbor = existing.join("unrelated.txt");
         std::fs::write(&neighbor, b"keep me").unwrap();
         client
@@ -1404,7 +1604,7 @@ mod tests {
             )
             .await
             .unwrap();
-        wait(|| client.handle(&id).is_ok()).await;
+        wait("new handle", || client.handle(&id).is_ok()).await;
         client
             .handle(&id)
             .unwrap()

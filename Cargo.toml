@@ -1,6 +1,6 @@
 [package]
 name = "flow-download"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -10,8 +10,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
 axum = "0.8"
+tokio-util = { version = "0.7", features = ["io"] }
 anyhow = "1"
 fs2 = "0.4"
 url = "2"

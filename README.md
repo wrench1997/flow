@@ -8,6 +8,13 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
+## What is new in v0.3.0
+
+- Right-click media tasks to play or stream while downloading; automatically detect common video/audio file types.
+- A single video window with mouse controls; open the additional Flow control panel only when needed.
+- Subtitle/audio selection, speed controls, and local playback-position history.
+- Fix pause/resume state synchronization, including resuming while file verification is running.
+
 ## Features
 
 - Magnet links and local `.torrent` files, with native file and folder pickers.
@@ -64,6 +71,18 @@ To reuse another client's files, add the matching torrent and choose the origina
 
 To upgrade, exit Flow through the tray menu, replace `Flow.exe`, and retain `data/` and your download folders.
 
+## Flow Player (v0.3.0)
+
+Flow now includes its own playback control panel backed by mpv. Download `setup-player.ps1` from the release assets beside `Flow.exe`, then run `./setup-player.ps1` once to download a pinned, SHA-256-verified Windows build linked from [mpv's installation page](https://mpv.io/installation/). It stays in `runtime/mpv/` beside Flow; no system installation or file association changes are needed.
+
+- Open **Player** in the toolbar for local video/audio or HTTP(S) media URLs.
+- For torrents/magnets, right-click a task and choose **Play / Play while downloading**. A single media file plays directly; multiple media files open a picker sorted by size. MP4, MKV and other common media extensions are recognized automatically after metadata loads. The **Files** tab also has individual Play buttons. This selects that file if needed and resumes the task.
+- Playback opens only the video window, with mouse controls on hover. The extra Flow panel is opened manually from the toolbar. Flow controls pause, seek, volume, speed, fullscreen, subtitles, and audio tracks. Playback positions are stored locally in `data/player-history.json`.
+- Torrent playback uses authenticated loopback HTTP with byte-range seeking and librqbit's stream-aware piece scheduling. It waits for missing pieces rather than reading unwritten file bytes.
+- Closing the control panel leaves playback running; closing the video window stops playback. Stopping playback does not pause downloads. Fully exiting Flow stops both.
+
+This is a first playback integration, not an embedded video canvas. Source availability and download speed determine buffering; dragging to missing data can take time. No DRM, sharing-page extraction, disc menus, or playlist manager is provided. Copy `runtime/mpv/` together with the executable when moving a player-enabled installation. The player is included starting with v0.3.0.
+
 ## Tracker resilience
 
 Flow preserves existing torrent Trackers and subscribes to public lists from [XIU2](https://github.com/XIU2/TrackersListCollection) and [ngosang](https://github.com/ngosang/trackerslist). These projects publish address lists; individual Tracker servers are independently operated.
@@ -105,11 +124,16 @@ To move an installation, copy the executable and `data/` together and keep the r
 | `src/engine.rs` | Download sessions, tasks, persistence, and local API |
 | `src/http_download.rs` | HTTP transfers and validated resume |
 | `src/file_ops.rs` | Scoped file deletion |
+| `src/player.rs` / `src/media.rs` | Player controls and HTTP byte-range support |
 | `src/tray.rs` | Windows tray and background lifecycle |
 | `src/trackers.rs` | Scrape queries and scoring |
 | `src/subscriptions.rs` | Sources, mirrors, cache, and retry policy |
 | `src/settings.rs` | Transfer settings and validation |
 | `assets/`, `build.rs` | Icons and Windows resource embedding |
+
+## Windows download notice
+
+Flow is currently unsigned. A user reported antivirus removal of a local preview build; the detection name and affected file have not been supplied, so the cause is unresolved. A new release is not proof that the detection is a false positive. Release checksums verify file identity, not safety. If blocked, keep the detection details for investigation instead of disabling protection.
 
 ## Current limitations
 

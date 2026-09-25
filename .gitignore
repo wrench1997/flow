@@ -36,3 +36,6 @@ self-check.json
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Optional local player runtime
+/runtime/

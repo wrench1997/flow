@@ -4,7 +4,10 @@ fn main() {
         winresource::WindowsResource::new()
             .set_icon("assets/flow.ico")
             .set("ProductName", "Flow 下载工作台")
-            .set("FileDescription", "Flow · Rust BitTorrent Download Manager")
+            .set(
+                "FileDescription",
+                "Flow · Download Manager and Media Player",
+            )
             .compile()
             .expect("compile Windows icon resource");
     }

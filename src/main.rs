@@ -4,6 +4,8 @@ mod backend;
 mod engine;
 mod file_ops;
 mod http_download;
+mod media;
+mod player;
 mod settings;
 mod subscriptions;
 mod trackers;
@@ -15,15 +17,20 @@ use std::{sync::mpsc, thread, time::Duration};
 
 enum Command {
     Select(String),
+    Play(String, usize, String),
     Post(&'static str, Value),
 }
 enum Event {
     State(Value),
     Error(String),
     Done,
+    Play(String, String, String),
+    PlayError(String),
 }
 
 struct DownloadApp {
+    player: player::Player,
+    media_choice: Option<(String, Vec<Value>)>,
     tray: Option<tray::Tray>,
     exit_requested: bool,
     add_paused: bool,
@@ -130,6 +137,10 @@ fn status(t: &Value) -> &str {
         "校验中"
     } else if num(t, "download_rate") > 0.0 {
         "下载中"
+    } else if text(t, "state") == "loading" {
+        "载入中"
+    } else if num(t, "peers") > 0.0 {
+        "等待数据"
     } else {
         "等待来源"
     }
@@ -185,6 +196,30 @@ impl DownloadApp {
             loop {
                 match commands.recv_timeout(Duration::from_millis(800)) {
                     Ok(Command::Select(id)) => selected = id,
+                    Ok(Command::Play(id, index, title)) => {
+                        let result = client
+                            .post(format!("{base}/api/play"))
+                            .bearer_auth(&token)
+                            .json(&json!({"id":id,"index":index}))
+                            .send()
+                            .and_then(|r| r.json::<Value>());
+                        match result {
+                            Ok(v) if v["path"].is_string() => {
+                                let _ = events.send(Event::Play(
+                                    format!("{}{}", base, text(&v, "path")),
+                                    title,
+                                    token.clone(),
+                                ));
+                            }
+                            Ok(v) => {
+                                let _ = events.send(Event::PlayError(text(&v, "error")));
+                            }
+                            Err(e) => {
+                                let _ = events.send(Event::PlayError(e.to_string()));
+                            }
+                        }
+                    }
+
                     Ok(Command::Post(path, data)) => {
                         let result = client
                             .post(format!("{base}{path}"))
@@ -227,6 +262,8 @@ impl DownloadApp {
             }
         });
         Self {
+            player: player::Player::new(root.clone()),
+            media_choice: None,
             tray: tray::Tray::new(cc).ok(),
             exit_requested: false,
             add_paused: false,
@@ -268,6 +305,29 @@ impl DownloadApp {
             "/api/action",
             json!({"id":self.selected,"action":action}),
         ));
+    }
+
+    fn play_media(&mut self, id: String, file: &Value) {
+        if let Some(source) = file["source"].as_str() {
+            self.player.play(source.into(), text(file, "path"), None);
+        } else {
+            self.player.open = false;
+            self.message = "正在准备播放文件…".into();
+            let _ = self.tx.send(Command::Play(
+                id,
+                file["index"].as_u64().unwrap_or(0) as usize,
+                text(file, "path"),
+            ));
+        }
+    }
+    fn play_task(&mut self, task: &Value) {
+        let mut files = list(&task["media_files"]);
+        files.sort_by(|a, b| num(b, "size").total_cmp(&num(a, "size")));
+        if files.len() == 1 {
+            self.play_media(text(task, "id"), &files[0]);
+        } else if !files.is_empty() {
+            self.media_choice = Some((text(task, "id"), files));
+        }
     }
 
     fn new_task(&mut self) {
@@ -428,7 +488,14 @@ impl DownloadApp {
                                     let mut checked = selected.contains(&index);
                                     if ui.checkbox(&mut checked, "").changed() { if checked { selected.insert(index); } else { selected.remove(&index); } }
                                 } else { ui.label("✓"); }
-                                ui.label(text(&f,"path")); ui.label(bytes(num(&f,"size")));
+                                ui.horizontal(|ui| {
+                                    ui.label(text(&f,"path"));
+                                    if bt && media::playable(&text(&f,"path")) && ui.small_button("▶ 播放").on_hover_text("选择此文件并继续下载，边下边播").clicked() {
+                                        self.player.open=false;
+                                        self.message="正在准备播放文件…".into();
+                                        let _=self.tx.send(Command::Play(self.selected.clone(),f["index"].as_u64().unwrap_or(0) as usize,text(&f,"path")));
+                                    }
+                                }); ui.label(bytes(num(&f,"size")));
                                 ui.label(format!("{:.1}%", if num(&f,"size") == 0.0 {100.0} else {num(&f,"done")/num(&f,"size")*100.0})); ui.end_row();
                             }
                         });
@@ -478,6 +545,7 @@ impl DownloadApp {
 
 impl eframe::App for DownloadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.player.ui(ctx);
         if let Some(tray) = &self.tray {
             while let Ok(action) = tray.events.try_recv() {
                 match action {
@@ -504,6 +572,14 @@ impl eframe::App for DownloadApp {
         }
         while let Ok(event) = self.rx.try_recv() {
             match event {
+                Event::PlayError(error) => {
+                    self.player.message = error;
+                    self.player.open = true;
+                }
+                Event::Play(source, title, token) => {
+                    self.message.clear();
+                    self.player.play(source, title, Some(&token));
+                }
                 Event::State(v) => {
                     let elapsed = self.sample_clock.elapsed().as_secs_f64();
                     if elapsed - self.last_sample >= 1.0 {
@@ -555,12 +631,7 @@ impl eframe::App for DownloadApp {
         let can_resume = !self.pending_action
             && selected_task.is_some_and(|t| t["paused"] == true || !text(t, "error").is_empty());
         let can_pause = !self.pending_action
-            && selected_task.is_some_and(|t| {
-                t["paused"] != true
-                    && text(t, "error").is_empty()
-                    && text(t, "state") != "checking"
-                    && text(t, "state") != "loading"
-            });
+            && selected_task.is_some_and(|t| t["paused"] != true && text(t, "error").is_empty());
         if has_selection
             && !ctx.wants_keyboard_input()
             && !self.add_open
@@ -600,6 +671,9 @@ impl eframe::App for DownloadApp {
                     .clicked()
                 {
                     self.new_task();
+                }
+                if ui.button("播放器…").clicked() {
+                    self.player.open = true;
                 }
                 ui.add_enabled_ui(self.connected && has_selection, |ui| {
                     if ui
@@ -787,12 +861,8 @@ impl eframe::App for DownloadApp {
                                     }
                                     let resumable =
                                         t["paused"] == true || !text(t, "error").is_empty();
-                                    let pausable = t["paused"] != true
-                                        && text(t, "error").is_empty()
-                                        && !matches!(
-                                            text(t, "state").as_str(),
-                                            "loading" | "checking"
-                                        );
+                                    let pausable =
+                                        t["paused"] != true && text(t, "error").is_empty();
                                     if response.double_clicked() {
                                         if resumable {
                                             self.action("resume");
@@ -801,6 +871,12 @@ impl eframe::App for DownloadApp {
                                         }
                                     }
                                     response.context_menu(|ui| {
+                                        let media_files=list(&t["media_files"]);
+                                        let label=if media_files.len()>1 {"▶ 选择视频 / 音频播放…"} else if text(t,"kind")=="http" && num(t,"progress")<1.0 {"▶ 播放媒体直链"} else if num(t,"progress")<1.0 {"▶ 边下边播"} else {"▶ 播放"};
+                                        if ui.add_enabled(!media_files.is_empty(),egui::Button::new(label))
+                                            .on_hover_text(if media_files.is_empty() {"尚未识别到媒体文件，请等待元数据加载"} else {"自动识别 MP4、MKV 等音视频；BT 播放会继续下载，HTTP 未完成时直接播放原始媒体链接"})
+                                            .clicked() {self.play_task(t); ui.close();}
+                                        ui.separator();
                                         if ui
                                             .add_enabled(
                                                 resumable || pausable,
@@ -889,6 +965,38 @@ impl eframe::App for DownloadApp {
                     });
             }
         });
+        if let Some((id, files)) = self.media_choice.clone() {
+            let mut open = true;
+            let mut selected = None;
+            egui::Window::new("选择要播放的文件")
+                .open(&mut open)
+                .default_width(580.0)
+                .show(ctx, |ui| {
+                    ui.weak("已自动识别音视频文件，按大小排序。播放会继续相应 BT 任务。");
+                    egui::ScrollArea::vertical()
+                        .max_height(360.0)
+                        .show(ui, |ui| {
+                            for file in files {
+                                if ui
+                                    .button(format!(
+                                        "▶ {}    {}",
+                                        text(&file, "path"),
+                                        bytes(num(&file, "size"))
+                                    ))
+                                    .clicked()
+                                {
+                                    selected = Some(file);
+                                }
+                            }
+                        });
+                });
+            if let Some(file) = selected {
+                self.play_media(id, &file);
+                self.media_choice = None;
+            } else if !open {
+                self.media_choice = None;
+            }
+        }
         if self.add_open {
             let mut open = true;
             egui::Window::new("新建下载任务")
