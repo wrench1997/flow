@@ -8,6 +8,11 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
+## v0.4.5 installer fix
+
+- Fix Windows canonical path handling when creating shortcuts, including Chinese names and spaces.
+- Use the selected installation folder directly without appending another Flow folder. Retry in the same directory while retaining user data.
+
 ## What is new in v0.4.4
 
 - Windows installer: choose a per-user installation directory, create shortcuts and register an uninstall entry. Uninstall retains downloads, runtime and personal data.
@@ -19,8 +24,8 @@ One executable starts both the desktop interface and embedded download engine. N
 
 | File | Use |
 | --- | --- |
-| `Flow-Setup-0.4.4-x64.exe` | Installer with directory selection, shortcuts and uninstall entry |
-| `Flow-0.4.4-windows-x64-portable.zip` | Extract and run; keep the extracted folder writable |
+| `Flow-Setup-0.4.5-x64.exe` | Installer with directory selection, shortcuts and uninstall entry |
+| `Flow-0.4.5-windows-x64-portable.zip` | Extract and run; keep the extracted folder writable |
 | `Flow.exe` | Replace an existing copy after fully exiting Flow |
 
 Use **Update** in the toolbar or **Settings → Software update / Mirror**. By default, Flow checks once each launch; downloads and installation require confirmation. Updates use the same in-place executable replacement for installed and portable copies. Existing downloads, `data/` and `runtime/` remain in place. Backups are saved under `data/updates/`.

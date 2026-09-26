@@ -28,14 +28,33 @@ fn reg(args: &[&str]) -> Result<()> {
     Ok(())
 }
 fn shortcuts(root: &Path, desktop: bool, remove: bool) -> Result<()> {
+    run_shortcuts(root, desktop, remove, None)
+}
+fn run_shortcuts(
+    root: &Path,
+    desktop: bool,
+    remove: bool,
+    test_directory: Option<&Path>,
+) -> Result<()> {
     let script = r#"$ErrorActionPreference='Stop'; $root=$env:FLOW_INSTALL_ROOT; $shell=New-Object -ComObject WScript.Shell; $paths=@((Join-Path ([Environment]::GetFolderPath('Programs')) 'Flow.lnk')); if($env:FLOW_INSTALL_DESKTOP -eq '1'){$paths+=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Flow.lnk'}; foreach($path in $paths){if($env:FLOW_INSTALL_REMOVE -eq '1'){if(Test-Path -LiteralPath $path){$link=$shell.CreateShortcut($path);if($link.TargetPath -eq (Join-Path $root 'Flow.exe')){Remove-Item -LiteralPath $path}}}else{$link=$shell.CreateShortcut($path);$link.TargetPath=Join-Path $root 'Flow.exe';$link.WorkingDirectory=$root;$link.IconLocation=(Join-Path $root 'Flow.exe')+',0';$link.Save()}}"#;
+    // Canonical Windows paths use \\?\, which PowerShell 5 providers and Shell links do not accept.
+    let root = dunce::simplified(root);
+    let script = format!(
+        "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding; try {{ {script} }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"
+    );
+    let script = script.replace("foreach($path in $paths)", "if($env:FLOW_SHORTCUT_TEST_DIR){$paths=@([IO.Path]::Combine($env:FLOW_SHORTCUT_TEST_DIR,'Flow.lnk'))}; foreach($path in $paths)");
     let exe = PathBuf::from(std::env::var_os("SystemRoot").context("Windows 目录不可用")?)
         .join("System32/WindowsPowerShell/v1.0/powershell.exe");
     let mut cmd = Command::new(exe);
-    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script])
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .env("FLOW_INSTALL_ROOT", root)
         .env("FLOW_INSTALL_DESKTOP", if desktop { "1" } else { "0" })
         .env("FLOW_INSTALL_REMOVE", if remove { "1" } else { "0" });
+    // Never inherit a test override from the launching process.
+    cmd.env_remove("FLOW_SHORTCUT_TEST_DIR");
+    if let Some(directory) = test_directory {
+        cmd.env("FLOW_SHORTCUT_TEST_DIR", dunce::simplified(directory));
+    }
     hidden(&mut cmd);
     let result = cmd.output()?;
     ensure!(
@@ -69,7 +88,7 @@ fn place_payload(source: &Path, root: &Path) -> Result<()> {
 fn install(source: &Path, root: &Path, desktop: bool) -> Result<()> {
     ensure!(root.is_absolute(), "请选择绝对安装路径");
     std::fs::create_dir_all(root)?;
-    let root = std::fs::canonicalize(root)?;
+    let root = dunce::canonicalize(root)?;
     ensure!(root.parent().is_some(), "不能安装到磁盘根目录");
     std::fs::create_dir_all(root.join("data"))?;
     let lock = std::fs::OpenOptions::new()
@@ -158,7 +177,7 @@ impl eframe::App for Installer {
             ui.heading(if self.uninstall {
                 "卸载 Flow"
             } else {
-                "安装 Flow 0.4.4"
+                concat!("安装 Flow ", env!("CARGO_PKG_VERSION"))
             });
             ui.add_space(12.0);
             ui.label(if self.uninstall {
@@ -176,7 +195,7 @@ impl eframe::App for Installer {
                     .clicked()
                 {
                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        self.directory = path.join("Flow").display().to_string();
+                        self.directory = path.display().to_string();
                     }
                 }
                 ui.checkbox(&mut self.desktop, "创建桌面快捷方式");
@@ -326,6 +345,26 @@ pub fn run(args: Vec<String>) -> eframe::Result {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(windows)]
+    fn canonical_paths_create_and_remove_real_shortcuts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("中文 path [test] ' &");
+        let links = temp.path().join("links");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&links).unwrap();
+        std::fs::write(root.join("Flow.exe"), b"fixture").unwrap();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        super::run_shortcuts(&canonical, true, false, Some(&links)).unwrap();
+        assert!(links.join("Flow.lnk").is_file());
+        // Repeat after a partial installation, then remove only a matching target.
+        super::run_shortcuts(&canonical, true, false, Some(&links)).unwrap();
+        super::run_shortcuts(temp.path(), true, true, Some(&links)).unwrap();
+        assert!(links.join("Flow.lnk").is_file());
+        super::run_shortcuts(&canonical, true, true, Some(&links)).unwrap();
+        assert!(!links.join("Flow.lnk").exists());
+    }
+
     #[test]
     fn installation_preserves_user_data_and_backs_up_executable() {
         let dir = tempfile::tempdir().unwrap();

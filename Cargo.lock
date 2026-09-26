@@ -1291,11 +1291,12 @@ dependencies = [
 
 [[package]]
 name = "flow-download"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "arboard",
  "axum",
+ "dunce",
  "ed25519-dalek",
  "eframe",
  "fs2",
