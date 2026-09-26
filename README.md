@@ -8,6 +8,27 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
+## What is new in v0.4.4
+
+- Windows installer: choose a per-user installation directory, create shortcuts and register an uninstall entry. Uninstall retains downloads, runtime and personal data.
+- Portable ZIP: extract the folder and run `Flow.exe`, with no installation required.
+- Automatic update checks on startup, manual checks, download progress and confirmation before replacing the executable. Installation stops Flow and restarts it afterward, preserving user data and an old-executable backup.
+- Configurable HTTPS GitHub mirror prefix, with fallback to GitHub. Signed update manifests and SHA-256 verification are enforced even through a mirror.
+
+## Downloads and updates
+
+| File | Use |
+| --- | --- |
+| `Flow-Setup-0.4.4-x64.exe` | Installer with directory selection, shortcuts and uninstall entry |
+| `Flow-0.4.4-windows-x64-portable.zip` | Extract and run; keep the extracted folder writable |
+| `Flow.exe` | Replace an existing copy after fully exiting Flow |
+
+Use **Update** in the toolbar or **Settings → Software update / Mirror**. By default, Flow checks once each launch; downloads and installation require confirmation. Updates use the same in-place executable replacement for installed and portable copies. Existing downloads, `data/` and `runtime/` remain in place. Backups are saved under `data/updates/`.
+
+Mirror setting: enter an HTTPS prefix provided by your proxy service. The client requests `PREFIX/https://github.com/…`; the service must support GitHub Releases assets and redirects. A configured mirror is tried first, then official GitHub on failure. Leave it blank for direct GitHub access. No public mirror is bundled or guaranteed available. Signature verification cannot be disabled; a forged manifest, a modified executable or a downgrade is rejected. The app currently targets Windows x64.
+
+Versions before v0.4.4 need one manual upgrade to obtain the updater. Installation does not automatically migrate data from a separate portable folder: exit Flow and copy `data/` and optional `runtime/` to the chosen installation directory if retaining that setup. Download paths remain unchanged; keep the original download folders.
+
 ## What is new in v0.4.3
 
 - After two minutes without connections or download progress, restart the existing task’s discovery stream, with a ten-minute cooldown. Paused/completed tasks and tasks with live peers are left alone; verified pieces are preserved. Discovery uses the task’s existing Trackers and DHT where allowed, not a scrape-only query. Formerly useful disconnected peers remain cached and are labeled as past contributors. Recovery attempts are recorded in the diagnostic log; discovering a usable alternative is not guaranteed.
@@ -186,6 +207,6 @@ Flow is currently unsigned. A user reported antivirus removal of a local preview
 
 ## Current limitations
 
-Flow is an early desktop implementation. Automatic application updates and persistent theme selection are not implemented. HTTP downloads use one connection per task and do not provide browser login/cookie integration or Content-Disposition filename extraction. Magnet metadata still requires reachable peers; adding Trackers cannot guarantee resolution. Applying new Tracker candidates requires verification. Statistics that librqbit does not reliably expose, such as connected complete seeders and distributed availability, are shown as unknown.
+Flow is an early desktop implementation. Persistent theme selection is not implemented. HTTP downloads use one connection per task and do not provide browser login/cookie integration or Content-Disposition filename extraction. Magnet metadata still requires reachable peers; adding Trackers cannot guarantee resolution. Applying new Tracker candidates requires verification. Statistics that librqbit does not reliably expose, such as connected complete seeders and distributed availability, are shown as unknown.
 
 Built with [egui](https://github.com/emilk/egui) and [librqbit](https://github.com/ikatson/rqbit).

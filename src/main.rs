@@ -4,6 +4,7 @@ mod backend;
 mod engine;
 mod file_ops;
 mod http_download;
+mod installer;
 mod media;
 mod open_request;
 mod peer_quality;
@@ -14,6 +15,7 @@ mod subscriptions;
 mod torrent_preview;
 mod trackers;
 mod tray;
+mod updater;
 
 use eframe::egui::{self, Color32, RichText};
 use serde_json::{Value, json};
@@ -48,6 +50,7 @@ struct DownloadApp {
     worker: Option<std::thread::JoinHandle<()>>,
     starting: bool,
     player: player::Player,
+    updater: updater::Updater,
     media_choice: Option<(String, Vec<Value>)>,
     pending_open: std::collections::VecDeque<String>,
     tray: Option<tray::Tray>,
@@ -485,6 +488,7 @@ impl DownloadApp {
             worker: Some(worker),
             starting: true,
             player: player::Player::new(root.clone()),
+            updater: updater::Updater::new(root.clone()),
             media_choice: None,
             pending_open: Default::default(),
             tray: tray::Tray::new(cc).ok(),
@@ -798,6 +802,10 @@ impl DownloadApp {
 
 impl eframe::App for DownloadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.updater.ui(ctx) {
+            self.exit_requested = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
             if let Some(path) = file.path {
@@ -1043,6 +1051,9 @@ impl eframe::App for DownloadApp {
                         serde_json::from_value(self.state["settings"].clone()).ok();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("更新…").clicked() {
+                        self.updater.open = true;
+                    }
                     if ui.checkbox(&mut self.dark, "深色").changed() {
                         ctx.set_visuals(if self.dark {
                             egui::Visuals::dark()
@@ -1656,6 +1667,7 @@ impl eframe::App for DownloadApp {
                     );
                     ui.weak("托盘双击显示窗口；托盘菜单“退出并停止下载”会保存状态并退出。");
                     ui.checkbox(&mut config.clipboard_watch, "复制磁力链接时弹出新建任务（包括网页中嵌入的磁力地址）");
+                    if ui.button("软件更新 / 镜像代理…").clicked() { self.updater.open = true; }
                     if ui.button("节点记录 / 黑名单管理…").clicked() { self.peer_manager = true; }
                     if ui.button("关联 .torrent 文件（双击用 Flow 打开）").clicked() {
                         self.message = match open_request::register_associations() {
@@ -1794,6 +1806,16 @@ mod task_filter_tests {
 
 fn main() -> eframe::Result {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|s| s == "--apply-update") {
+        if let Err(error) = updater::apply_update(&args) {
+            updater::report_helper_error(&format!("{error:#}"));
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    if installer::requested(&args) {
+        return installer::run(args);
+    }
     if args.first().is_some_and(|s| s == "--register-torrents") {
         if let Err(error) = open_request::register_associations() {
             eprintln!("{error:#}");

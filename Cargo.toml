@@ -1,6 +1,6 @@
 [package]
 name = "flow-download"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 
 [dependencies]
@@ -24,6 +24,7 @@ tray-icon = { version = "0.25.1", default-features = false }
 raw-window-handle = "0.6"
 arboard = { version = "3.6.1", default-features = false }
 sha2 = "0.10"
+ed25519-dalek = "2"
 
 [dev-dependencies]
 tempfile = "3"
