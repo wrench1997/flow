@@ -8,6 +8,18 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
+## What is new in v0.4.2
+
+- Peer records and manual IP blacklist management persist locally. Reference scores use observed sustained/intermittent/idle transfer (90/60/10); new peers remain unscored. Blocking and unblocking require restarting Flow to update the native incoming/outgoing connection filter. Shared IPs affect all BT tasks; there is no automatic malicious-client classification. Records include the latest observed task, client, cumulative session transfers, errors and policy reason.
+
+- Remove the composite Tracker score from the UI. Peer rows and reconnect-cache candidates prioritize sustained received data: three positive 10-second samples, then intermittent transfer, new observations, and idle peers. Recent receive rates and cumulative uploads/downloads are visible. This does not override engine bandwidth scheduling or automatically ban clients. Connection diagnostics now include failed/disconnected peers, instead of only live connections.
+
+- Long links scroll inside a bounded input area; the import dialog is constrained to the available window height.
+
+- Drag one or more `.torrent` files into Flow to queue import dialogs. Local torrents are parsed before adding; select the files to download and see their combined size. Empty selections cannot start.
+- Settings includes a `.torrent` association button. Double-clicking opens the same import dialog, including when Flow is already running. If Windows has an explicit default, select Flow in Open with → Always.
+- Magnets can be added paused, then configured in the Files tab once metadata arrives. Shared pieces can write some data to adjacent unselected files.
+
 ## What is new in v0.4.1
 
 - First playback automatically downloads, verifies and installs the pinned mpv runtime. Download progress and retry are built into Flow; playback resumes after setup. No manual PowerShell script is needed. Existing installations are reused.

@@ -2,6 +2,87 @@
 use anyhow::{Context, Result, ensure};
 use std::path::{Path, PathBuf};
 
+/// Register per-user shell handlers without modifying protected Windows UserChoice.
+pub fn register_associations() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let command = format!("\"{}\" --open \"%1\"", exe.display());
+    let icon = format!("\"{}\",0", exe.display());
+    let values = [
+        (r"Software\Classes\Flow.Torrent", "", "Flow Torrent"),
+        (
+            r"Software\Classes\Flow.Torrent\shell\open\command",
+            "",
+            command.as_str(),
+        ),
+        (
+            r"Software\Classes\Flow.Torrent\DefaultIcon",
+            "",
+            icon.as_str(),
+        ),
+        (r"Software\Classes\.torrent", "", "Flow.Torrent"),
+        (
+            r"Software\Classes\.torrent\OpenWithProgids",
+            "Flow.Torrent",
+            "",
+        ),
+        (r"Software\Flow\Capabilities", "ApplicationName", "Flow"),
+        (
+            r"Software\Flow\Capabilities",
+            "ApplicationDescription",
+            "Flow torrent download manager",
+        ),
+        (
+            r"Software\Flow\Capabilities\FileAssociations",
+            ".torrent",
+            "Flow.Torrent",
+        ),
+        (
+            r"Software\RegisteredApplications",
+            "Flow",
+            r"Software\Flow\Capabilities",
+        ),
+    ];
+    let reg = PathBuf::from(std::env::var_os("SystemRoot").context("找不到 Windows 系统目录")?)
+        .join("System32/reg.exe");
+    for (key, name, value) in values {
+        let mut cmd = std::process::Command::new(&reg);
+        cmd.args(["add", &format!("HKCU\\{key}")]);
+        if name.is_empty() {
+            cmd.arg("/ve");
+        } else {
+            cmd.args(["/v", name]);
+        }
+        cmd.args(["/t", "REG_SZ", "/d", value, "/f"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        let output = cmd.output()?;
+        ensure!(
+            output.status.success(),
+            "注册种子关联失败：{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "shell32")]
+        unsafe extern "system" {
+            fn SHChangeNotify(
+                event: u32,
+                flags: u32,
+                a: *const std::ffi::c_void,
+                b: *const std::ffi::c_void,
+            );
+        }
+        unsafe {
+            SHChangeNotify(0x08000000, 0, std::ptr::null(), std::ptr::null());
+        }
+    }
+    Ok(())
+}
+
 pub fn clipboard_sequence() -> u32 {
     #[cfg(windows)]
     {

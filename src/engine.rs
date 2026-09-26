@@ -57,6 +57,9 @@ pub struct Engine {
     operations: tokio::sync::Mutex<()>,
     loading: Mutex<BTreeMap<String, Value>>,
     completed_cache: Mutex<BTreeMap<String, Value>>,
+    peer_quality: Mutex<BTreeMap<String, BTreeMap<String, crate::peer_quality::Window>>>,
+    peer_records: Mutex<BTreeMap<String, Value>>,
+    active_bans: std::collections::BTreeSet<String>,
     pub offline: bool,
 }
 
@@ -234,6 +237,35 @@ impl Engine {
         if let Some(listener) = opts.listen.as_mut() {
             listener.ipv4_only = true;
         }
+        let records_path = data.join("peer-records.json");
+        let peer_records: BTreeMap<String, Value> = if records_path.exists() {
+            serde_json::from_slice(&std::fs::read(&records_path)?).context("节点记录文件损坏")?
+        } else {
+            BTreeMap::new()
+        };
+        let active_bans: std::collections::BTreeSet<String> = peer_records
+            .iter()
+            .filter(|(ip, record)| {
+                record["blocked"] == true && ip.parse::<std::net::IpAddr>().is_ok()
+            })
+            .map(|(ip, _)| ip.clone())
+            .collect();
+        let blocklist = data.join("peer-blocklist.txt");
+        std::fs::write(
+            &blocklist,
+            format!(
+                "# Flow local IP blacklist\n{}",
+                active_bans
+                    .iter()
+                    .map(|ip| format!("Flow:{ip}-{ip}\n"))
+                    .collect::<String>()
+            ),
+        )?;
+        opts.blocklist_url = Some(
+            url::Url::from_file_path(&blocklist)
+                .map_err(|_| anyhow::anyhow!("黑名单路径无效"))?
+                .to_string(),
+        );
         startup_stage(root, "初始化网络和下载会话");
         let session = Session::new_with_opts(root.join("downloads"), opts).await?;
         let engine = Arc::new(Self {
@@ -250,6 +282,9 @@ impl Engine {
             operations: tokio::sync::Mutex::new(()),
             loading: Mutex::new(BTreeMap::new()),
             completed_cache: Mutex::new(BTreeMap::new()),
+            peer_quality: Mutex::new(BTreeMap::new()),
+            peer_records: Mutex::new(peer_records),
+            active_bans,
             offline,
         });
         engine.persist()?;
@@ -657,6 +692,7 @@ impl Engine {
         source: String,
         save_path: String,
         paused: bool,
+        only_files: Option<Vec<usize>>,
     ) -> Result<String> {
         let source = source.trim().to_string();
         let save = PathBuf::from(save_path.trim());
@@ -667,7 +703,10 @@ impl Engine {
             crate::http_download::validate_url(&source)?;
         } else if !source.starts_with("magnet:?") {
             let p = Path::new(&source);
-            if p.extension().and_then(|v| v.to_str()) != Some("torrent")
+            if !p
+                .extension()
+                .and_then(|v| v.to_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case("torrent"))
                 || std::fs::metadata(p)?.len() > 20_000_000
             {
                 bail!("请选择小于 20 MB 的 .torrent 文件");
@@ -675,6 +714,17 @@ impl Engine {
             output_path(&std::fs::read(p)?, &save)?;
         } else {
             url::Url::parse(&source)?;
+        }
+        if let Some(indices) = &only_files {
+            anyhow::ensure!(
+                !crate::http_download::is_http(&source) && !source.starts_with("magnet:?"),
+                "请先解析磁力元数据，再在文件页选择下载文件"
+            );
+            let files = crate::torrent_preview::read(Path::new(&source))?;
+            anyhow::ensure!(
+                !indices.is_empty() && indices.iter().all(|i| *i < files.len()),
+                "至少选择一个有效文件"
+            );
         }
         let id = uuid::Uuid::new_v4().simple().to_string();
         {
@@ -687,6 +737,7 @@ impl Engine {
                 source,
                 save_path: save.display().to_string(),
                 paused,
+                only_files,
                 ..Default::default()
             });
         }
@@ -1277,9 +1328,28 @@ impl Engine {
                         && !addr.ip().is_unspecified()
                         && !addr.ip().is_multicast()
                         && p.counters.fetched_bytes > 0
+                        && self
+                            .peer_records
+                            .lock()
+                            .unwrap()
+                            .get(&addr.ip().to_string())
+                            .is_none_or(|r| r["blocked"] != true)
                 })
                 .collect::<Vec<_>>();
-            good.sort_by_key(|(_, p)| std::cmp::Reverse(p.counters.fetched_bytes));
+            {
+                let quality = self.peer_quality.lock().unwrap();
+                good.sort_by_key(|(addr, p)| {
+                    let q = quality
+                        .get(&id)
+                        .and_then(|peers| peers.get(&addr.to_string()))
+                        .map(|w| w.quality(trackers::now()));
+                    (
+                        q.map(|q| q.rank).unwrap_or(2),
+                        std::cmp::Reverse(q.map(|q| q.rate).unwrap_or(0)),
+                        std::cmp::Reverse(p.counters.fetched_bytes),
+                    )
+                });
+            }
             let peers = good
                 .into_iter()
                 .take(64)
@@ -1297,12 +1367,20 @@ impl Engine {
         if changed {
             self.persist()?;
         }
+        atomic(
+            &self.data.join("peer-records.json"),
+            &serde_json::to_vec_pretty(&*self.peer_records.lock().unwrap())?,
+        )?;
         Ok(())
     }
 
     pub fn snapshot(&self, selected: &str) -> Value {
         let entries = self.entries.lock().unwrap().clone();
         let handles = self.handles.lock().unwrap().clone();
+        self.peer_quality
+            .lock()
+            .unwrap()
+            .retain(|id, _| handles.contains_key(id));
         let mut tasks = Vec::new();
         let mut detail = json!({"files":[],"peers":[],"trackers":[],"discovery":self.discovery.lock().unwrap().get(selected).cloned().unwrap_or(json!({}))});
         for e in entries {
@@ -1441,9 +1519,11 @@ impl Engine {
                     })
                     .unwrap_or((0, 0, json!({})));
                 let live_peers = peers["live"].as_u64().unwrap_or(0);
-                let peer_details = h
-                    .live()
-                    .map(|live| live.per_peer_stats_snapshot(Default::default()));
+                let peer_details = h.live().map(|live| {
+                    live.per_peer_stats_snapshot(
+                        serde_json::from_value(json!({"state":"all"})).expect("valid peer filter"),
+                    )
+                });
                 let attempts: u64 = peer_details
                     .as_ref()
                     .map(|p| {
@@ -1464,6 +1544,89 @@ impl Engine {
                 let actually_paused =
                     h.is_paused() || matches!(stats.state, librqbit::TorrentStatsState::Paused);
                 item["paused"] = json!(actually_paused);
+                let mut peer_rows = Vec::new();
+                let mut stable_peers = 0usize;
+                {
+                    let mut quality = self.peer_quality.lock().unwrap();
+                    let windows = quality.entry(e.id.clone()).or_default();
+                    if actually_paused || initializing || stats.finished {
+                        windows.clear();
+                    }
+                    if let Some(details) = &peer_details {
+                        windows.retain(|addr, _| details.peers.contains_key(addr));
+                        for (addr, peer) in &details.peers {
+                            let now = trackers::now();
+                            let q = windows
+                                .entry(addr.clone())
+                                .or_insert_with(|| {
+                                    crate::peer_quality::Window::new(
+                                        now,
+                                        peer.counters.fetched_bytes,
+                                    )
+                                })
+                                .observe(now, peer.counters.fetched_bytes);
+                            if q.rank == 0 {
+                                stable_peers += 1;
+                            }
+                            peer_rows.push(json!({"address":addr,"client":peer.client_name.clone().unwrap_or_default(),"downloaded":peer.counters.fetched_bytes,"uploaded":peer.counters.uploaded_bytes,"errors":peer.counters.errors,"state":peer.state,"transfer_rank":q.rank,"recent_rate":q.rate,"idle_seconds":q.idle,"transfer_status":q.label}));
+                        }
+                    }
+                }
+                {
+                    let mut records = self.peer_records.lock().unwrap();
+                    for row in &peer_rows {
+                        if let Ok(addr) = row["address"]
+                            .as_str()
+                            .unwrap_or("")
+                            .parse::<std::net::SocketAddr>()
+                        {
+                            let record = records.entry(addr.ip().to_string()).or_insert_with(
+                                || json!({"first_seen":trackers::now(),"blocked":false}),
+                            );
+                            for key in [
+                                "address",
+                                "client",
+                                "downloaded",
+                                "uploaded",
+                                "errors",
+                                "recent_rate",
+                                "transfer_status",
+                                "idle_seconds",
+                            ] {
+                                record[key] = row[key].clone();
+                            }
+                            record["task"] = json!(e.id);
+                            record["last_seen"] = json!(trackers::now());
+                            record["score"] = match row["transfer_rank"].as_u64() {
+                                Some(0) => json!(90),
+                                Some(1) => json!(60),
+                                Some(3) => json!(10),
+                                _ => Value::Null,
+                            };
+                        }
+                    }
+                    while records.len() > 2000 {
+                        let oldest = records
+                            .iter()
+                            .filter(|(_, r)| r["blocked"] != true)
+                            .min_by_key(|(_, r)| r["last_seen"].as_u64().unwrap_or(0))
+                            .map(|(ip, _)| ip.clone());
+                        if let Some(ip) = oldest {
+                            records.remove(&ip);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                peer_rows.sort_by_key(|p| {
+                    (
+                        p["transfer_rank"].as_u64().unwrap_or(3),
+                        std::cmp::Reverse(p["recent_rate"].as_u64().unwrap_or(0)),
+                        p["address"].as_str().unwrap_or("").to_owned(),
+                    )
+                });
+                item["stable_peers"] = json!(stable_peers);
+
                 let ratio = if stats.total_bytes == 0 {
                     0.0
                 } else {
@@ -1480,7 +1643,9 @@ impl Engine {
                 } else if stats.finished {
                     "下载完成，正在做种".into()
                 } else if down > 0 {
-                    "正在接收数据".into()
+                    format!(
+                        "正在接收数据；当前连接 {live_peers} 个，已观察到持续收数节点 {stable_peers} 个"
+                    )
                 } else if live_peers == 0 && attempts > 0 {
                     format!(
                         "已找到候选节点，累计尝试连接 {attempts} 次，节点错误 {connection_errors} 次，目前无连接；引擎继续重试。Tracker 报告数不代表可连接节点"
@@ -1529,9 +1694,7 @@ impl Engine {
                     }
                     // Session lookup takes its global DB lock, held while another
                     // torrent opens all files. We already own this task's handle.
-                    if let Some(p) = peer_details {
-                        detail["peers"]=json!(p.peers.into_iter().map(|(addr,p)|json!({"address":addr,"client":p.client_name.unwrap_or_default(),"downloaded":p.counters.fetched_bytes,"errors":p.counters.errors,"state":p.state})).collect::<Vec<_>>());
-                    }
+                    detail["peers"] = json!(peer_rows);
                 }
             }
             if selected == e.id {
@@ -1542,21 +1705,28 @@ impl Engine {
                         let metric = e.metrics.get(url).cloned().unwrap_or_default();
                         let mut row = serde_json::to_value(&metric).unwrap();
                         row["url"] = json!(url);
-                        row["score"] = json!(metric.score());
+
                         row
                     })
                     .collect::<Vec<_>>();
-                rows.sort_by(|a, b| {
-                    b["score"]
-                        .as_f64()
-                        .unwrap_or(-1.0)
-                        .total_cmp(&a["score"].as_f64().unwrap_or(-1.0))
-                });
+                rows.sort_by_key(|r| r["url"].as_str().unwrap_or("").to_owned());
                 detail["trackers"] = json!(rows);
             }
             tasks.push(item);
         }
-        json!({"tasks":tasks,"detail":detail,"settings":*self.settings.lock().unwrap(),"subscriptions":self.subscriptions.snapshot(),"events":*self.events.lock().unwrap(),"engine":"librqbit 9.0.1 · Rust","listen_port":self.session.announce_port().unwrap_or(0),"updated_at":trackers::now(),"discovery":*self.discovery.lock().unwrap()})
+        let records: Vec<Value> = self
+            .peer_records
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(ip, record)| {
+                let mut row = record.clone();
+                row["ip"] = json!(ip);
+                row["active_block"] = json!(self.active_bans.contains(ip));
+                row
+            })
+            .collect();
+        json!({"peer_records":records,"tasks":tasks,"detail":detail,"settings":*self.settings.lock().unwrap(),"subscriptions":self.subscriptions.snapshot(),"events":*self.events.lock().unwrap(),"engine":"librqbit 9.0.1 · Rust","listen_port":self.session.announce_port().unwrap_or(0),"updated_at":trackers::now(),"discovery":*self.discovery.lock().unwrap()})
     }
 }
 
@@ -1602,11 +1772,60 @@ async fn add(State(s): State<ApiState>, Json(v): Json<Value>) -> Response {
                 v["source"].as_str().unwrap_or("").into(),
                 v["save_path"].as_str().unwrap_or("").into(),
                 v["paused"].as_bool().unwrap_or(false),
+                match v.get("only_files").filter(|v| !v.is_null()) {
+                    Some(value) => match serde_json::from_value::<Vec<usize>>(value.clone()) {
+                        Ok(indices) => Some(indices),
+                        Err(_) => return reply(Err(anyhow::anyhow!("文件选择格式无效"))),
+                    },
+                    None => None,
+                },
             )
             .await
             .map(|id| json!({"id":id})),
     )
 }
+async fn peer_policy(State(s): State<ApiState>, Json(v): Json<Value>) -> Response {
+    reply((|| -> Result<Value> {
+        let ip = v["ip"]
+            .as_str()
+            .context("缺少 IP")?
+            .parse::<std::net::IpAddr>()?
+            .to_string();
+        let blocked = v["blocked"].as_bool().context("缺少黑名单状态")?;
+        let mut records = s.engine.peer_records.lock().unwrap();
+        let mut updated = records.clone();
+        let row = updated.get_mut(&ip).context("节点记录不存在")?;
+        row["blocked"] = json!(blocked);
+        row["policy_updated"] = json!(trackers::now());
+        row["reason"] = json!(if blocked {
+            "用户根据传输记录手动加入黑名单"
+        } else {
+            "用户手动解除黑名单"
+        });
+        atomic(
+            &s.engine.data.join("peer-records.json"),
+            &serde_json::to_vec_pretty(&updated)?,
+        )?;
+        *records = updated;
+        drop(records);
+        if blocked {
+            for entry in s.engine.entries.lock().unwrap().iter_mut() {
+                entry
+                    .initial_peers
+                    .retain(|addr| addr.ip().to_string() != ip);
+            }
+            s.engine.persist()?;
+        }
+        s.engine.event(
+            "",
+            "info",
+            "peer_policy",
+            &format!("节点 {ip} 黑名单={blocked}；重启后应用连接规则"),
+        );
+        Ok(json!({"ok":true,"restart_required":true}))
+    })())
+}
+
 async fn action(State(s): State<ApiState>, Json(v): Json<Value>) -> Response {
     reply(
         s.engine
@@ -1801,6 +2020,7 @@ pub async fn serve(
         .route("/api/tasks", post(add))
         .route("/api/action", post(action))
         .route("/api/subscriptions", post(subscriptions))
+        .route("/api/peer-policy", post(peer_policy))
         .route("/api/settings", post(settings))
         .route("/api/files", post(select_files))
         .route("/api/play", post(prepare_play))
@@ -1892,6 +2112,17 @@ pub async fn serve(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn persisted_blacklist_is_loaded_by_native_engine() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("data")).unwrap();
+        std::fs::write(root.path().join("data/peer-records.json"), br#"{"192.0.2.7":{"blocked":true},"2001:db8::7":{"blocked":true},"192.0.2.8":{"blocked":false}}"#).unwrap();
+        let engine = super::Engine::new(root.path(), true).await.unwrap();
+        assert!(engine.session.blocklist.has("192.0.2.7".parse().unwrap()));
+        assert!(engine.session.blocklist.has("2001:db8::7".parse().unwrap()));
+        assert!(!engine.session.blocklist.has("192.0.2.8".parse().unwrap()));
+        engine.session.stop().await;
+    }
     use super::*;
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn completed_restore_uses_bitmap_without_opening_download_files() {
@@ -2181,10 +2412,12 @@ mod tests {
                 source.display().to_string(),
                 dest.display().to_string(),
                 true,
+                Some(vec![0]),
             )
             .await
             .unwrap();
         wait("new handle", || client.handle(&id).is_ok()).await;
+        assert_eq!(client.handle(&id).unwrap().only_files(), Some(vec![0]));
         client
             .handle(&id)
             .unwrap()

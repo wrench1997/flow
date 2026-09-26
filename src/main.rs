@@ -6,10 +6,12 @@ mod file_ops;
 mod http_download;
 mod media;
 mod open_request;
+mod peer_quality;
 mod player;
 mod player_setup;
 mod settings;
 mod subscriptions;
+mod torrent_preview;
 mod trackers;
 mod tray;
 
@@ -51,6 +53,13 @@ struct DownloadApp {
     tray: Option<tray::Tray>,
     exit_requested: bool,
     add_paused: bool,
+    preview_source: String,
+    preview_files: Vec<(String, u64)>,
+    preview_selected: std::collections::BTreeSet<usize>,
+    preview_error: String,
+    peer_manager: bool,
+    only_blocked_peers: bool,
+    peer_policy_confirm: Option<(String, bool)>,
     remove_mode: String,
     remove_targets: Vec<String>,
     selection: std::collections::BTreeSet<String>,
@@ -487,6 +496,13 @@ impl DownloadApp {
             selection_anchor: None,
             selection_base: Default::default(),
             file_edit: None,
+            preview_source: String::new(),
+            preview_files: Vec::new(),
+            preview_selected: Default::default(),
+            preview_error: String::new(),
+            peer_manager: false,
+            only_blocked_peers: false,
+            peer_policy_confirm: None,
             history: Default::default(),
             sample_clock: std::time::Instant::now(),
             last_sample: -1.0,
@@ -737,7 +753,7 @@ impl DownloadApp {
                         if text(&t,"kind") == "http" { ui.label("HTTP 直链任务不使用 Tracker。"); return; }
                         ui.horizontal(|ui| {
                             let running = self.state["detail"]["discovery"]["running"].as_bool().unwrap_or(false);
-                            if ui.add_enabled(!running, egui::Button::new(if running {"正在发现…"} else {"发现与健康检查"})).clicked() {self.action("discover");}
+                            if ui.add_enabled(!running, egui::Button::new(if running {"正在发现…"} else {"发现与查询统计"})).clicked() {self.action("discover");}
                             if ui.button("添加 Tracker…").clicked() {self.tracker_open = true;}
                             if ui.button("订阅设置…").clicked() {
                                 self.subscription_edit = serde_json::from_value(self.state["subscriptions"]["config"].clone()).ok();
@@ -746,11 +762,10 @@ impl DownloadApp {
                             if ui.button("应用候选（重新校验）").clicked() {self.action("apply_trackers");}
                         });
                         ui.label(text(&self.state["detail"]["discovery"], "message"));
-                        ui.weak("健康分仅衡量 Tracker 响应，不代表下载速度；报告做种数只占少量权重。实际有效节点按已传输数据缓存，无法可靠归因到单个 Tracker。");
-                        egui::Grid::new("trackers").striped(true).num_columns(8).show(ui, |ui| {
-                            for title in ["健康分", "Tracker 地址", "报告做种数", "响应耗时", "成功 / 失败", "来源", "状态", "响应 / 错误原因"] {ui.strong(title);} ui.end_row();
+                        ui.weak("这里只展示 Tracker 查询结果，不能证明有人给你上传。实际收数与持续性请看“对等连接”；不同 Tracker 报告人数不可相加。");
+                        egui::Grid::new("trackers").striped(true).num_columns(7).show(ui, |ui| {
+                            for title in ["Tracker 地址", "服务器报告做种数", "查询耗时", "查询成功 / 失败", "列表来源", "查询状态", "响应 / 错误原因"] {ui.strong(title);} ui.end_row();
                             for t in list(&self.state["detail"]["trackers"]) {
-                                ui.label(if t["score"].is_number() {format!("{:.1}",num(&t,"score"))} else {"—".into()});
                                 ui.label(text(&t,"url"));
                                 ui.label(if t["seeders"].is_number() {format!("{:.0}",num(&t,"seeders"))} else {"—".into()});
                                 ui.label(if t["latency_ms"].is_number() {format!("{:.0} ms",num(&t,"latency_ms"))} else {"—".into()});
@@ -760,11 +775,16 @@ impl DownloadApp {
                         });
                     }
                     3 => {
-                        egui::Grid::new("peers").striped(true).num_columns(4).min_col_width(120.0).show(ui, |ui| {
-                            for h in ["地址", "客户端", "累计接收", "连接状态"] {ui.strong(h);} ui.end_row();
+                        if ui.button("节点记录 / 黑名单管理…").clicked() { self.peer_manager = true; }
+                        ui.weak("排序：持续收数 → 间歇收数 → 新节点观察 → 暂无有效传输。每 10 秒采样，连续 3 次收数才算持续；无数据降序，不自动封禁。此顺序也用于重连候选缓存，不代表强制带宽分配。");
+                        egui::Grid::new("peers").striped(true).num_columns(7).min_col_width(120.0).show(ui, |ui| {
+                            for h in ["地址", "客户端", "累计接收", "累计上传", "近期接收均速", "传输观察", "连接状态"] {ui.strong(h);} ui.end_row();
                             for p in list(&self.state["detail"]["peers"]) {
                                 ui.label(text(&p,"address")); ui.label(text(&p,"client"));
                                 ui.label(bytes(num(&p,"downloaded")));
+                                ui.label(bytes(num(&p,"uploaded")));
+                                ui.label(format!("{}/s", bytes(num(&p,"recent_rate"))));
+                                ui.label(text(&p,"transfer_status")).on_hover_text(format!("距开始观察或上次收数 {:.0} 秒",num(&p,"idle_seconds")));
                                 ui.label(text(&p,"state")); ui.end_row();
                             }
                         });
@@ -778,6 +798,21 @@ impl DownloadApp {
 
 impl eframe::App for DownloadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        for file in dropped {
+            if let Some(path) = file.path {
+                match open_request::validate(&path.display().to_string()) {
+                    Ok(source) => {
+                        if !self.pending_open.contains(&source)
+                            && !(self.add_open && self.source == source)
+                        {
+                            self.pending_open.push_back(source);
+                        }
+                    }
+                    Err(error) => self.message = format!("无法导入：{error}"),
+                }
+            }
+        }
         self.player.ui(ctx);
         if let Some(tray) = &self.tray {
             while let Ok(action) = tray.events.try_recv() {
@@ -1370,12 +1405,36 @@ impl eframe::App for DownloadApp {
             }
         }
         if self.add_open {
+            if self.preview_source != self.source {
+                self.preview_source = self.source.clone();
+                self.preview_files.clear();
+                self.preview_selected.clear();
+                self.preview_error.clear();
+                let path = std::path::Path::new(self.source.trim());
+                if path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.eq_ignore_ascii_case("torrent"))
+                {
+                    match torrent_preview::read(path) {
+                        Ok(files) => {
+                            self.preview_selected = (0..files.len()).collect();
+                            self.preview_files = files;
+                        }
+                        Err(error) => self.preview_error = format!("无法解析种子：{error}"),
+                    }
+                }
+            }
             let mut open = true;
             egui::Window::new("新建下载任务")
+                .id(egui::Id::new("add-task-compact"))
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
-                .default_width(550.0)
+                .default_width(550.0_f32.min((ctx.content_rect().width() - 40.0).max(240.0)))
+                .max_width((ctx.content_rect().width() - 40.0).max(240.0))
+                .max_height((ctx.content_rect().height() - 80.0).max(160.0))
+                .vscroll(true)
                 .show(ctx, |ui| {
                     ui.label("磁力链接 / HTTP(S) 直链 / 本机 .torrent 文件路径");
                     if ui.button("选择种子文件…").clicked() {
@@ -1386,11 +1445,36 @@ impl eframe::App for DownloadApp {
                             self.source = path.display().to_string();
                         }
                     }
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.source)
-                            .desired_rows(3)
-                            .desired_width(f32::INFINITY),
-                    );
+                    egui::ScrollArea::vertical()
+                        .id_salt("new-task-source")
+                        .max_height(90.0)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.source)
+                                    .desired_rows(3)
+                                    .desired_width(f32::INFINITY),
+                            );
+                        });
+                    if !self.preview_files.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.strong("选择下载文件");
+                            if ui.button("全选").clicked() { self.preview_selected = (0..self.preview_files.len()).collect(); }
+                            if ui.button("全不选").clicked() { self.preview_selected.clear(); }
+                        });
+                        egui::ScrollArea::vertical().id_salt("new-task-files").max_height(230.0).show(ui, |ui| {
+                            for (index, (name, size)) in self.preview_files.iter().enumerate() {
+                                let mut checked = self.preview_selected.contains(&index);
+                                if ui.checkbox(&mut checked, format!("{}  ({})", name, bytes(*size as f64))).changed() {
+                                    if checked { self.preview_selected.insert(index); } else { self.preview_selected.remove(&index); }
+                                }
+                            }
+                        });
+                        let size: u64 = self.preview_selected.iter().map(|i| self.preview_files[*i].1).sum();
+                        ui.label(format!("已选 {} / {} 个文件 · {}", self.preview_selected.len(), self.preview_files.len(), bytes(size as f64)));
+                        ui.weak("仅下载勾选文件；相邻文件可能写入共享分片。");
+                    }
+                    if !self.preview_error.is_empty() { ui.colored_label(Color32::RED, &self.preview_error); }
+                    if self.source.trim().starts_with("magnet:?") { ui.weak("磁力链接：勾选“添加后暂停”，解析后在文件页选择并应用，再继续下载。"); }
                     ui.label("保存目录");
                     if ui.button("浏览目录…").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
@@ -1409,19 +1493,64 @@ impl eframe::App for DownloadApp {
                     ui.add_space(10.0);
                     if ui
                         .add_enabled(
-                            !self.source.trim().is_empty() && !self.save_path.trim().is_empty(),
+                            self.connected && self.preview_source == self.source && self.preview_error.is_empty() && (self.preview_files.is_empty() || !self.preview_selected.is_empty()) && !self.source.trim().is_empty() && !self.save_path.trim().is_empty(),
                             egui::Button::new("开始下载"),
                         )
                         .clicked()
                     {
                         let _ = self.tx.send(Command::Post(
                             "/api/tasks",
-                            json!({"source":self.source,"save_path":self.save_path,"paused":self.add_paused}),
+                            json!({"source":self.source,"save_path":self.save_path,"paused":self.add_paused,"only_files": if self.preview_files.is_empty() { None } else { Some(self.preview_selected.iter().copied().collect::<Vec<_>>()) }}),
                         ));
                         self.add_open = false;
                     }
                 });
             self.add_open &= open;
+        }
+        if self.peer_manager {
+            let mut open = true;
+            egui::Window::new("节点记录与黑名单").open(&mut open).default_width(850.0).max_height((ctx.content_rect().height()-80.0).max(180.0)).vscroll(true).show(ctx, |ui| {
+                ui.label("传输参考分：持续收数 90，间歇收数 60，观察满一分钟暂无传输 10；新节点不打分。分数只反映本机近期观察，不证明恶意。");
+                ui.weak("记录最后一次观察的任务和会话累计收发；历史分数不代表当前状态。黑名单按 IP 作用于所有 BT 任务，重启后阻止进出连接；解除同样需重启。");
+                ui.checkbox(&mut self.only_blocked_peers, "只显示黑名单");
+                let mut records = list(&self.state["peer_records"]);
+                records.sort_by_key(|r| (!r["blocked"].as_bool().unwrap_or(false), std::cmp::Reverse(r["score"].as_u64().unwrap_or(0))));
+                for row in records.into_iter().filter(|r| !self.only_blocked_peers || r["blocked"] == true) {
+                    let ip = text(&row,"ip");
+                    let blocked = row["blocked"] == true;
+                    ui.push_id(&ip, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.strong(&ip);
+                            ui.label(if row["score"].is_number() {format!("参考分 {}",row["score"])} else {"观察中 / 未评分".into()});
+                            ui.label(text(&row,"transfer_status"));
+                            ui.label(format!("接收 {} / 上传 {}",bytes(num(&row,"downloaded")),bytes(num(&row,"uploaded"))));
+                            if ui.button(if blocked {"解除黑名单"} else {"加入黑名单"}).clicked() { self.peer_policy_confirm = Some((ip.clone(), !blocked)); }
+                        });
+                        if blocked != (row["active_block"] == true) { ui.colored_label(Color32::from_rgb(200,120,35), "连接规则待重启生效"); }
+                        else if blocked { ui.label("引擎正在屏蔽此 IP"); }
+                        ui.collapsing("详细记录", |ui| {
+                            ui.label(format!("客户端：{} · 地址：{}",text(&row,"client"),text(&row,"address")));
+                            ui.label(format!("近期均速：{}/s · 节点错误：{:.0} · 最后观察距今：{} 秒",bytes(num(&row,"recent_rate")),num(&row,"errors"),trackers::now().saturating_sub(row["last_seen"].as_u64().unwrap_or(0))));
+                            ui.label(format!("任务 ID：{} · 首次记录（Unix 秒）：{}",text(&row,"task"),row["first_seen"]));
+                            ui.label(format!("策略原因：{} · 修改时间（Unix 秒）：{}",text(&row,"reason"),row["policy_updated"]));
+                            if ui.button("复制完整记录").clicked() { ui.ctx().copy_text(serde_json::to_string_pretty(&row).unwrap_or_default()); }
+                        });
+                        ui.separator();
+                    });
+                }
+            });
+            self.peer_manager = open;
+        }
+        if let Some((ip, blocked)) = self.peer_policy_confirm.clone() {
+            egui::Window::new("确认节点规则").collapsible(false).show(ctx, |ui| {
+                ui.label(format!("{} IP {}？作用于所有 BT 任务，可能影响共享同一 IP 的其他用户。重启 Flow 后生效。",if blocked {"屏蔽"} else {"解除屏蔽"},ip));
+                if ui.add_enabled(!self.pending_action,egui::Button::new("确认")).clicked() {
+                    self.pending_action = true;
+                    let _ = self.tx.send(Command::Post("/api/peer-policy", json!({"ip":ip,"blocked":blocked})));
+                    self.peer_policy_confirm = None;
+                }
+                if ui.button("取消").clicked() { self.peer_policy_confirm = None; }
+            });
         }
         if self.tracker_open {
             let mut open = true;
@@ -1527,6 +1656,13 @@ impl eframe::App for DownloadApp {
                     );
                     ui.weak("托盘双击显示窗口；托盘菜单“退出并停止下载”会保存状态并退出。");
                     ui.checkbox(&mut config.clipboard_watch, "复制磁力链接时弹出新建任务（包括网页中嵌入的磁力地址）");
+                    if ui.button("节点记录 / 黑名单管理…").clicked() { self.peer_manager = true; }
+                    if ui.button("关联 .torrent 文件（双击用 Flow 打开）").clicked() {
+                        self.message = match open_request::register_associations() {
+                            Ok(()) => "已注册种子关联。如系统已有默认应用，请右键种子 → 打开方式 → Flow → 始终使用。".into(),
+                            Err(error) => format!("关联失败：{error}"),
+                        };
+                    }
                     ui.weak("仅在本机识别，不访问分享网页；确认后才开始下载。Flow 需保持运行或驻留托盘。");
                     ui.horizontal(|ui| {
                         ui.label("下载 KiB/s");
@@ -1658,6 +1794,13 @@ mod task_filter_tests {
 
 fn main() -> eframe::Result {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|s| s == "--register-torrents") {
+        if let Err(error) = open_request::register_associations() {
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if args.iter().any(|arg| arg == "--check-clipboard") {
         let result = arboard::Clipboard::new().and_then(|mut c| c.get_text());
         let report = json!({"sequence":open_request::clipboard_sequence(),"readable":result.is_ok(),"magnet_detected":result.as_ref().ok().and_then(|s|open_request::copied_magnet(s)).is_some()});
