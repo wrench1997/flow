@@ -60,6 +60,7 @@ pub struct Engine {
     peer_quality: Mutex<BTreeMap<String, BTreeMap<String, crate::peer_quality::Window>>>,
     peer_records: Mutex<BTreeMap<String, Value>>,
     active_bans: std::collections::BTreeSet<String>,
+    recovery: Mutex<BTreeMap<String, crate::peer_quality::Recovery>>,
     pub offline: bool,
 }
 
@@ -285,6 +286,7 @@ impl Engine {
             peer_quality: Mutex::new(BTreeMap::new()),
             peer_records: Mutex::new(peer_records),
             active_bans,
+            recovery: Mutex::new(BTreeMap::new()),
             offline,
         });
         engine.persist()?;
@@ -1301,6 +1303,53 @@ impl Engine {
         Ok(json!({"total":total,"files":files}))
     }
 
+    async fn recover_disconnected(&self) {
+        if self.offline {
+            return;
+        }
+        let handles = self.handles.lock().unwrap().clone();
+        self.recovery
+            .lock()
+            .unwrap()
+            .retain(|id, _| handles.contains_key(id));
+        for (id, handle) in handles {
+            let Ok(_operation) = self.operations.try_lock() else {
+                continue;
+            };
+            let Ok(entry) = self.entry(&id) else {
+                continue;
+            };
+            let stats = handle.stats();
+            let stalled = !entry.paused
+                && !handle.is_paused()
+                && !stats.finished
+                && stats.error.is_none()
+                && stats.live.as_ref().is_some_and(|live| {
+                    live.download_speed.as_bytes() == 0 && live.snapshot.peer_stats.live == 0
+                });
+            let due = self
+                .recovery
+                .lock()
+                .unwrap()
+                .entry(id.clone())
+                .or_default()
+                .due(trackers::now(), stalled, stats.progress_bytes);
+            if !due {
+                continue;
+            }
+            // Preserve verified pieces and the same handle; this refreshes its discovery stream.
+            let result = async {
+                self.session.pause(&handle).await?;
+                self.session.unpause(&handle).await
+            }
+            .await;
+            match result {
+                Ok(()) => self.event(&id, "info", "peer_recovery", "连续两分钟无连接且无进展，已重新启动节点发现；保留已有数据，十分钟内不重复触发"),
+                Err(error) => self.event(&id, "warn", "peer_recovery", &format!("节点发现恢复失败：{error}；可手动继续任务")),
+            }
+        }
+    }
+
     fn remember_working_peers(&self) -> Result<()> {
         let handles = self.handles.lock().unwrap().clone();
         let mut changed = false;
@@ -1315,7 +1364,9 @@ impl Engine {
                 continue;
             };
             let mut good = live
-                .per_peer_stats_snapshot(Default::default())
+                .per_peer_stats_snapshot(
+                    serde_json::from_value(json!({"state":"all"})).expect("valid peer filter"),
+                )
                 .peers
                 .into_iter()
                 .filter_map(|(addr, p)| {
@@ -1568,7 +1619,7 @@ impl Engine {
                             if q.rank == 0 {
                                 stable_peers += 1;
                             }
-                            peer_rows.push(json!({"address":addr,"client":peer.client_name.clone().unwrap_or_default(),"downloaded":peer.counters.fetched_bytes,"uploaded":peer.counters.uploaded_bytes,"errors":peer.counters.errors,"state":peer.state,"transfer_rank":q.rank,"recent_rate":q.rate,"idle_seconds":q.idle,"transfer_status":q.label}));
+                            peer_rows.push(json!({"address":addr,"client":peer.client_name.clone().unwrap_or_default(),"downloaded":peer.counters.fetched_bytes,"uploaded":peer.counters.uploaded_bytes,"errors":peer.counters.errors,"state":peer.state,"transfer_rank":q.rank,"recent_rate":q.rate,"idle_seconds":q.idle,"transfer_status":if peer.state == "dead" && peer.counters.fetched_bytes > 0 { "已断开 · 曾有效传输" } else { q.label }}));
                         }
                     }
                 }
@@ -2062,6 +2113,13 @@ pub async fn serve(
             }
         }
     });
+    let recovery_engine = engine.clone();
+    let recovery_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            recovery_engine.recover_disconnected().await;
+        }
+    });
     let snapshot_task = tokio::spawn(async move {
         let mut sample = 0u32;
         loop {
@@ -2096,6 +2154,7 @@ pub async fn serve(
         }
     }
     restore_task.abort();
+    recovery_task.abort();
     snapshot_task.abort();
     maintenance_task.abort();
     engine.persist()?;

@@ -1,5 +1,32 @@
 use std::collections::VecDeque;
 
+#[derive(Default)]
+pub struct Recovery {
+    since: Option<u64>,
+    last_attempt: Option<u64>,
+    progress: u64,
+}
+impl Recovery {
+    pub fn due(&mut self, now: u64, stalled: bool, progress: u64) -> bool {
+        if !stalled || self.progress != progress {
+            self.since = None;
+            self.progress = progress;
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        if now.saturating_sub(since) < 120
+            || self
+                .last_attempt
+                .is_some_and(|t| now.saturating_sub(t) < 600)
+        {
+            return false;
+        }
+        self.last_attempt = Some(now);
+        self.since = Some(now);
+        true
+    }
+}
+
 pub struct Window {
     started: u64,
     sampled: u64,
@@ -73,6 +100,18 @@ impl Window {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_requires_stall_and_respects_progress_and_cooldown() {
+        let mut r = Recovery::default();
+        assert!(!r.due(0, true, 0));
+        assert!(!r.due(119, true, 0));
+        assert!(r.due(120, true, 0));
+        assert!(!r.due(300, true, 0));
+        assert!(!r.due(720, false, 0));
+        assert!(!r.due(730, true, 1));
+        assert!(!r.due(740, true, 1));
+        assert!(r.due(860, true, 1));
+    }
     #[test]
     fn sustained_transfer_outranks_bursts_and_idle_peers() {
         let mut stable = Window::new(0, 0);

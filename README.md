@@ -8,6 +8,10 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
+## What is new in v0.4.3
+
+- After two minutes without connections or download progress, restart the existing task’s discovery stream, with a ten-minute cooldown. Paused/completed tasks and tasks with live peers are left alone; verified pieces are preserved. Discovery uses the task’s existing Trackers and DHT where allowed, not a scrape-only query. Formerly useful disconnected peers remain cached and are labeled as past contributors. Recovery attempts are recorded in the diagnostic log; discovering a usable alternative is not guaranteed.
+
 ## What is new in v0.4.2
 
 - Peer records and manual IP blacklist management persist locally. Reference scores use observed sustained/intermittent/idle transfer (90/60/10); new peers remain unscored. Blocking and unblocking require restarting Flow to update the native incoming/outgoing connection filter. Shared IPs affect all BT tasks; there is no automatic malicious-client classification. Records include the latest observed task, client, cumulative session transfers, errors and policy reason.
