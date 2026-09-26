@@ -10,8 +10,8 @@ use axum::{
     routing::{get, post},
 };
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ManagedTorrent, Session,
-    SessionOptions, SessionPersistenceConfig, api::TorrentIdOrHash,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, SessionOptions,
+    SessionPersistenceConfig, api::TorrentIdOrHash,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -40,6 +40,7 @@ pub struct Entry {
     pub metrics: BTreeMap<String, Metric>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub initial_peers: Vec<std::net::SocketAddr>,
+    pub peer_cache_updated: u64,
 }
 
 pub struct Engine {
@@ -54,6 +55,8 @@ pub struct Engine {
     events: Mutex<VecDeque<Value>>,
     discovery: Mutex<BTreeMap<String, Value>>,
     operations: tokio::sync::Mutex<()>,
+    loading: Mutex<BTreeMap<String, Value>>,
+    completed_cache: Mutex<BTreeMap<String, Value>>,
     pub offline: bool,
 }
 
@@ -69,6 +72,32 @@ fn atomic(path: &Path, data: &[u8]) -> Result<()> {
 
 /// libtorrent stores a multi-file torrent below its name; rqbit's explicit
 /// output_folder instead names that subdirectory itself. Preserve that mapping.
+fn metadata_size(bytes: &[u8]) -> Result<(usize, u64)> {
+    use serde_bencode::value::Value as B;
+    let B::Dict(root) = serde_bencode::from_bytes::<B>(bytes)? else {
+        bail!("无效种子");
+    };
+    let Some(B::Dict(info)) = root.get(b"info".as_slice()) else {
+        bail!("缺少 info");
+    };
+    let length = |value: Option<&B>| match value {
+        Some(B::Int(n)) if *n >= 0 => *n as u64,
+        _ => 0,
+    };
+    if let Some(B::List(files)) = info.get(b"files".as_slice()) {
+        let total = files
+            .iter()
+            .map(|file| match file {
+                B::Dict(file) => length(file.get(b"length".as_slice())),
+                _ => 0,
+            })
+            .fold(0u64, u64::saturating_add);
+        Ok((files.len(), total))
+    } else {
+        Ok((1, length(info.get(b"length".as_slice()))))
+    }
+}
+
 fn output_path(bytes: &[u8], base: &Path) -> Result<PathBuf> {
     use serde_bencode::value::Value as B;
     let B::Dict(root) = serde_bencode::from_bytes::<B>(bytes)? else {
@@ -141,6 +170,7 @@ impl Engine {
     pub async fn new(root: &Path, offline: bool) -> Result<Arc<Self>> {
         let data = root.join("data");
         std::fs::create_dir_all(&data)?;
+        startup_stage(root, "读取配置和任务目录");
         let settings_file = data.join("settings.json");
         let settings: crate::settings::Settings = if settings_file.exists() {
             serde_json::from_slice(&std::fs::read(&settings_file)?)?
@@ -158,6 +188,22 @@ impl Engine {
         } else {
             Vec::new()
         };
+        // Flow owns task restoration. Preserve librqbit fast-resume bitmaps,
+        // but do not let Session::new restore the same tasks before API startup.
+        if catalog.exists() {
+            let session_file = data.join("rqbit/session.json");
+            if session_file.exists() {
+                startup_stage(root, "准备续传状态（备份引擎任务索引）");
+                let previous = std::fs::read(&session_file)?;
+                // A backup is created before rebuilding the derived index.
+                let backup = data.join(format!(
+                    "rqbit/session-startup-{}.json",
+                    uuid::Uuid::new_v4().simple()
+                ));
+                atomic(&backup, &previous)?;
+                atomic(&session_file, br#"{"torrents":{}}"#)?;
+            }
+        }
         let mut opts = SessionOptions {
             fastresume: true,
             persistence: Some(SessionPersistenceConfig::Json {
@@ -188,6 +234,7 @@ impl Engine {
         if let Some(listener) = opts.listen.as_mut() {
             listener.ipv4_only = true;
         }
+        startup_stage(root, "初始化网络和下载会话");
         let session = Session::new_with_opts(root.join("downloads"), opts).await?;
         let engine = Arc::new(Self {
             http_jobs: Mutex::new(BTreeMap::new()),
@@ -201,9 +248,12 @@ impl Engine {
             events: Mutex::new(VecDeque::new()),
             discovery: Mutex::new(BTreeMap::new()),
             operations: tokio::sync::Mutex::new(()),
+            loading: Mutex::new(BTreeMap::new()),
+            completed_cache: Mutex::new(BTreeMap::new()),
             offline,
         });
         engine.persist()?;
+        startup_stage(root, "下载会话已就绪");
         Ok(engine)
     }
 
@@ -255,17 +305,78 @@ impl Engine {
     }
 
     pub async fn restore(self: &Arc<Self>) {
-        let entries = self.entries.lock().unwrap().clone();
+        let mut entries = self.entries.lock().unwrap().clone();
+        // Opening thousands of files is synchronous inside librqbit. Restore
+        // cached, small-file-count tasks first; unresolved magnets go last.
+        let mut costs = BTreeMap::new();
+        for entry in &entries {
+            if entry.paused
+                && entry.error.is_empty()
+                && entry.deletion_files.is_none()
+                && entry.only_files.is_none()
+            {
+                if let Ok(cached) = self.cached_complete(entry) {
+                    self.completed_cache
+                        .lock()
+                        .unwrap()
+                        .insert(entry.id.clone(), cached);
+                }
+            }
+            let summary = std::fs::read(self.data.join(format!("{}.torrent", entry.id)))
+                .ok()
+                .and_then(|bytes| metadata_size(&bytes).ok());
+            costs.insert(entry.id.clone(), summary.map(|v| v.0).unwrap_or(usize::MAX));
+            self.loading.lock().unwrap().insert(
+                entry.id.clone(),
+                json!({
+                    "stage":"排队恢复（小任务优先）", "started":trackers::now(),
+                    "files":summary.map(|v| v.0), "total":summary.map(|v| v.1)
+                }),
+            );
+        }
+        entries.sort_by_key(|entry| {
+            if crate::http_download::is_http(&entry.source) {
+                0
+            } else {
+                costs[&entry.id]
+            }
+        });
+        let mut resolutions = tokio::task::JoinSet::new();
         for entry in entries {
+            if self.completed_cache.lock().unwrap().contains_key(&entry.id) {
+                self.loading.lock().unwrap().remove(&entry.id);
+                continue;
+            }
+            if entry.source.starts_with("magnet:?")
+                && !self.data.join(format!("{}.torrent", entry.id)).exists()
+            {
+                if resolutions.len() >= 2 {
+                    let _ = resolutions.join_next().await;
+                }
+                let engine = self.clone();
+                resolutions.spawn(async move {
+                    if let Err(error) = engine.load(&entry.id).await {
+                        engine.error(&entry.id, &format!("{error:#}"));
+                    }
+                    engine.loading.lock().unwrap().remove(&entry.id);
+                });
+                continue;
+            }
             if let Err(e) = self.load(&entry.id).await {
                 self.error(&entry.id, &format!("{e:#}"));
             }
+            self.loading.lock().unwrap().remove(&entry.id);
         }
+        while resolutions.join_next().await.is_some() {}
     }
 
     async fn load(self: &Arc<Self>, id: &str) -> Result<()> {
+        self.completed_cache.lock().unwrap().remove(id);
         let mut operation = Some(self.operations.lock().await);
         let entry = self.entry(id)?;
+        if self.handles.lock().unwrap().contains_key(id) {
+            return Ok(());
+        }
         if entry.deletion_files.is_some() {
             bail!("此任务有尚未完成的删除操作，请重新删除任务");
         }
@@ -291,6 +402,12 @@ impl Engine {
         }
         let metadata_file = self.data.join(format!("{id}.torrent"));
         let mut seen_peers = entry.initial_peers.clone();
+        if entry.peer_cache_updated > 0
+            && trackers::now().saturating_sub(entry.peer_cache_updated) > 7 * 86400
+        {
+            seen_peers.clear();
+        }
+        seen_peers.truncate(64);
         let bytes = if metadata_file.exists() {
             std::fs::read(&metadata_file)?
         } else if entry.source.starts_with("magnet:?") {
@@ -301,24 +418,71 @@ impl Engine {
             for tr in &entry.trackers {
                 magnet.query_pairs_mut().append_pair("tr", tr);
             }
-            let resolution = tokio::time::timeout(
-                Duration::from_secs(90),
-                self.session.add_torrent(
-                    AddTorrent::from_url(magnet.to_string()),
-                    Some(AddTorrentOptions {
-                        list_only: true,
-                        ..Default::default()
-                    }),
-                ),
-            );
-            let response = tokio::select! {
-                result = resolution => result,
-                _ = async { loop { tokio::time::sleep(Duration::from_millis(200)).await; if self.entry(id).is_err() { break; } } } => bail!("任务已移除，取消解析"),
+            let mut resolved = None;
+            for attempt in 1..=2 {
+                // Tracker-less magnets can use subscribed public sources before
+                // metadata resolution. Do not augment explicit/private tracker sets.
+                if !self.offline && !magnet.query_pairs().any(|(k, _)| k == "tr") {
+                    self.event(
+                        id,
+                        "info",
+                        "metadata_sources",
+                        "补充订阅中的公开 Tracker 辅助磁力解析",
+                    );
+                    let client = reqwest::Client::builder()
+                        .timeout(Duration::from_secs(5))
+                        .build()?;
+                    if let Ok((sources, _)) = tokio::time::timeout(
+                        Duration::from_secs(15),
+                        self.subscriptions.candidates(&client),
+                    )
+                    .await
+                    {
+                        for tracker in sources.keys().take(40) {
+                            magnet.query_pairs_mut().append_pair("tr", tracker);
+                        }
+                    }
+                }
+                self.loading.lock().unwrap().insert(id.into(),json!({"stage":format!("获取元数据，第 {attempt}/2 轮；DHT {}，候选 Tracker {}，缓存节点 {}",if self.session.get_dht().is_some(){"已启用"}else{"关闭"},magnet.query_pairs().filter(|(k,_)| k=="tr").count(),seen_peers.len()),"started":trackers::now()}));
+                let resolution = tokio::time::timeout(
+                    Duration::from_secs(90),
+                    self.session.add_torrent(
+                        AddTorrent::from_url(magnet.to_string()),
+                        Some(AddTorrentOptions {
+                            list_only: true,
+                            initial_peers: Some(seen_peers.clone()),
+                            ..Default::default()
+                        }),
+                    ),
+                );
+                let response = tokio::select! {
+                    result = resolution => result,
+                    _ = async { loop { tokio::time::sleep(Duration::from_millis(200)).await; if self.entry(id).map_or(true, |e| !entry.paused && e.paused) { break; } } } => {self.loading.lock().unwrap().remove(id);return Ok(());},
+                };
+                match response {
+                    Ok(Ok(value)) => {
+                        resolved = Some(value);
+                        break;
+                    }
+                    error => {
+                        let reason = match error {
+                            Ok(Err(e)) => format!("{e:#}"),
+                            Err(_) => "90 秒内未收到完整元数据".into(),
+                            _ => unreachable!(),
+                        };
+                        self.event(
+                            id,
+                            "warning",
+                            "metadata_retry",
+                            &format!("第 {attempt} 轮失败：{reason}"),
+                        );
+                    }
+                }
             }
-            .context("磁力解析超时，请重试或导入种子文件")??;
-            match response {
+            match resolved.context("元数据获取失败：两轮找源仍未收到完整元数据。请查看诊断日志，重试或导入 .torrent；Tracker 有做种统计不代表节点可连接。")? {
                 AddTorrentResponse::ListOnly(r) => {
                     seen_peers = r.seen_peers;
+                    seen_peers.truncate(64);
                     r.torrent_bytes.to_vec()
                 }
                 _ => bail!("这个磁力任务已存在"),
@@ -332,6 +496,14 @@ impl Engine {
         let _operation = operation;
         let entry = self.entry(id)?;
         let bytes = metadata_with_trackers(&bytes, &entry.trackers)?;
+        let (file_count, total) = metadata_size(&bytes)?;
+        self.loading.lock().unwrap().insert(id.into(), json!({"stage":"正在打开本地文件", "started":trackers::now(), "files":file_count, "total":total}));
+        self.event(
+            id,
+            "info",
+            "restore_files",
+            &format!("正在打开 {file_count} 个本地文件；完成后加载续传数据"),
+        );
         let output = entry
             .rust_output
             .as_ref()
@@ -341,11 +513,11 @@ impl Engine {
         atomic(&metadata_file, &bytes)?;
         let opts = AddTorrentOptions {
             only_files: entry.only_files.clone(),
-            paused: entry.paused,
+            paused: true,
             overwrite: true,
             output_folder: Some(output.display().to_string()),
             trackers: Some(entry.trackers.clone()),
-            initial_peers: Some(seen_peers),
+            initial_peers: Some(seen_peers.clone()),
             ..Default::default()
         };
         let response = self
@@ -353,6 +525,8 @@ impl Engine {
             .add_torrent(AddTorrent::from_bytes(bytes), Some(opts))
             .await?;
         let handle = response.into_handle().context("引擎未返回下载任务")?;
+        // Pause requests made while file opening was in progress must win.
+        let entry = self.entry(id)?;
         if self
             .handles
             .lock()
@@ -382,6 +556,18 @@ impl Engine {
             e.rust_output = Some(output.display().to_string());
             e.error.clear();
             e.trackers = trackers;
+            if !handle
+                .with_metadata(|m| m.info.info().private)
+                .unwrap_or(true)
+            {
+                e.initial_peers = seen_peers.clone();
+                if !e.initial_peers.is_empty() {
+                    e.peer_cache_updated = trackers::now();
+                }
+            } else {
+                e.initial_peers.clear();
+                e.peer_cache_updated = 0;
+            }
         }
         self.handles
             .lock()
@@ -414,6 +600,7 @@ impl Engine {
                 if stats.finished && !engine.settings.lock().unwrap().seed_after_download {
                     let result = async {
                         if matches!(state, librqbit::TorrentStatsState::Live) {
+                            let _ = engine.remember_working_peers();
                             engine.session.pause(&handle).await?;
                         }
                         if !entry.paused {
@@ -521,6 +708,16 @@ impl Engine {
         trackers_text: &str,
     ) -> Result<()> {
         let entry = self.entry(id)?;
+        if self.completed_cache.lock().unwrap().contains_key(id) {
+            if action == "pause"
+                || (action == "resume" && !self.settings.lock().unwrap().seed_after_download)
+            {
+                return Ok(());
+            }
+            if matches!(action, "recheck" | "apply_trackers") {
+                self.load(id).await?;
+            }
+        }
         if action == "remove" {
             return self
                 .remove(
@@ -701,6 +898,9 @@ impl Engine {
     }
 
     async fn select_files(self: &Arc<Self>, id: &str, indices: Vec<usize>) -> Result<()> {
+        if self.completed_cache.lock().unwrap().contains_key(id) {
+            self.load(id).await?;
+        }
         let _operation = self.operations.lock().await;
         let h = self.handle(id)?;
         let count = h.with_metadata(|m| m.file_infos.len())?;
@@ -788,6 +988,17 @@ impl Engine {
                         .map(|(_, f)| root.join(&f.relative_filename))
                         .collect::<Vec<_>>()
                 })?
+            } else if let Some(cached) = self.completed_cache.lock().unwrap().get(id) {
+                if mode == "all" {
+                    cached["files"]
+                        .as_array()
+                        .context("缺少文件记录")?
+                        .iter()
+                        .map(|f| root.join(f["path"].as_str().unwrap_or("")))
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             } else {
                 // Without loaded metadata no download paths can be safely attributed to this task.
                 anyhow::ensure!(
@@ -956,6 +1167,139 @@ impl Engine {
         Ok(())
     }
 
+    // Completed, stopped tasks do not need thousands of writable file handles.
+    // Trust only a complete persisted piece bitmap, as fast resume does; this
+    // is saved completion state, not a fresh disk verification.
+    fn cached_complete(&self, entry: &Entry) -> Result<Value> {
+        let bytes = std::fs::read(self.data.join(format!("{}.torrent", entry.id)))?;
+        let parsed = librqbit::torrent_from_bytes(&bytes)?;
+        use serde_bencode::value::Value as B;
+        let B::Dict(root) = serde_bencode::from_bytes::<B>(&bytes)? else {
+            bail!("metadata");
+        };
+        let Some(B::Dict(info)) = root.get(b"info".as_slice()) else {
+            bail!("info");
+        };
+        let Some(B::Bytes(pieces)) = info.get(b"pieces".as_slice()) else {
+            bail!("pieces");
+        };
+        let count = pieces.len() / 20;
+        let bits = std::fs::read(
+            self.data
+                .join("rqbit")
+                .join(format!("{:?}.bitv", parsed.info_hash)),
+        )?;
+        anyhow::ensure!(
+            count > 0
+                && bits.len() == count.div_ceil(8)
+                && (0..count).all(|i| bits[i / 8] & (0x80 >> (i % 8)) != 0),
+            "尚未完成"
+        );
+        let (_, total) = metadata_size(&bytes)?;
+        let output = entry
+            .rust_output
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or(output_path(&bytes, Path::new(&entry.save_path))?);
+        let mut files = Vec::new();
+        if let Some(B::List(rows)) = info.get(b"files".as_slice()) {
+            for (index, row) in rows.iter().enumerate() {
+                let B::Dict(row) = row else {
+                    bail!("file");
+                };
+                let Some(B::List(parts)) = row
+                    .get(b"path.utf-8".as_slice())
+                    .or_else(|| row.get(b"path".as_slice()))
+                else {
+                    bail!("path");
+                };
+                let mut path = PathBuf::new();
+                for part in parts {
+                    let B::Bytes(part) = part else {
+                        bail!("path");
+                    };
+                    let part = std::str::from_utf8(part)?;
+                    anyhow::ensure!(
+                        !part.is_empty()
+                            && part != "."
+                            && part != ".."
+                            && !part.contains(['/', '\\', ':']),
+                        "unsafe path"
+                    );
+                    path.push(part);
+                }
+                let Some(B::Int(size)) = row.get(b"length".as_slice()) else {
+                    bail!("length");
+                };
+                files.push(json!({"index":index,"path":path.display().to_string(),"size":size,"done":size,"selected":true,"source":output.join(path).display().to_string()}));
+            }
+        } else {
+            let Some(B::Bytes(name)) = info
+                .get(b"name.utf-8".as_slice())
+                .or_else(|| info.get(b"name".as_slice()))
+            else {
+                bail!("name");
+            };
+            let name = std::str::from_utf8(name)?;
+            anyhow::ensure!(
+                !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':']),
+                "unsafe name"
+            );
+            files.push(json!({"index":0,"path":name,"size":total,"done":total,"selected":true,"source":output.join(name).display().to_string()}));
+        }
+        Ok(json!({"total":total,"files":files}))
+    }
+
+    fn remember_working_peers(&self) -> Result<()> {
+        let handles = self.handles.lock().unwrap().clone();
+        let mut changed = false;
+        for (id, handle) in handles {
+            if handle
+                .with_metadata(|m| m.info.info().private)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            let Some(live) = handle.live() else {
+                continue;
+            };
+            let mut good = live
+                .per_peer_stats_snapshot(Default::default())
+                .peers
+                .into_iter()
+                .filter_map(|(addr, p)| {
+                    addr.parse::<std::net::SocketAddr>()
+                        .ok()
+                        .map(|addr| (addr, p))
+                })
+                .filter(|(addr, p)| {
+                    addr.port() != 0
+                        && !addr.ip().is_unspecified()
+                        && !addr.ip().is_multicast()
+                        && p.counters.fetched_bytes > 0
+                })
+                .collect::<Vec<_>>();
+            good.sort_by_key(|(_, p)| std::cmp::Reverse(p.counters.fetched_bytes));
+            let peers = good
+                .into_iter()
+                .take(64)
+                .map(|(addr, _)| addr)
+                .collect::<Vec<_>>();
+            if peers.is_empty() {
+                continue;
+            }
+            if let Some(entry) = self.entries.lock().unwrap().iter_mut().find(|e| e.id == id) {
+                entry.initial_peers = peers;
+                entry.peer_cache_updated = trackers::now();
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist()?;
+        }
+        Ok(())
+    }
+
     pub fn snapshot(&self, selected: &str) -> Value {
         let entries = self.entries.lock().unwrap().clone();
         let handles = self.handles.lock().unwrap().clone();
@@ -963,6 +1307,20 @@ impl Engine {
         let mut detail = json!({"files":[],"peers":[],"trackers":[],"discovery":self.discovery.lock().unwrap().get(selected).cloned().unwrap_or(json!({}))});
         for e in entries {
             let mut item = json!({"id":e.id,"name":e.source,"save_path":e.save_path,"paused":e.paused,"error":e.error,"progress":0,"download_rate":0,"upload_rate":0,"done":0,"total":0,"peers":0,"seeds":null,"availability":-1,"state":"loading","diagnosis":if e.error.is_empty(){"正在解析元数据或载入任务"}else{&e.error}});
+            if e.error.is_empty() {
+                if let Some(load) = self.loading.lock().unwrap().get(&e.id) {
+                    item["total"] = load["total"].clone();
+                    item["diagnosis"] = json!(format!(
+                        "{} · {} 个文件 · 已等待 {} 秒；下载进度将在续传状态就绪后显示",
+                        load["stage"].as_str().unwrap_or("恢复中"),
+                        load["files"]
+                            .as_u64()
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "未知数量".into()),
+                        trackers::now().saturating_sub(load["started"].as_u64().unwrap_or(0))
+                    ));
+                }
+            }
             item["kind"] = json!(if crate::http_download::is_http(&e.source) {
                 "http"
             } else {
@@ -1034,6 +1392,26 @@ impl Engine {
                             .into_owned()
                     })
             );
+            if let Some(cached) = self.completed_cache.lock().unwrap().get(&e.id) {
+                if selected == e.id {
+                    detail["files"] = cached["files"].clone();
+                }
+                item["media_files"] = json!(
+                    cached["files"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|f| crate::media::playable(f["path"].as_str().unwrap_or("")))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                );
+                item["total"] = cached["total"].clone();
+                item["done"] = cached["total"].clone();
+                item["progress"] = json!(1.0);
+                item["state"] = json!("complete");
+                item["diagnosis"] =
+                    json!("已完成，已停止做种（已保存的完成状态；需要重新验证文件时点击校验文件）");
+            }
             if let Some(h) = handles.get(&e.id) {
                 let stats = h.stats();
                 let mut magnet = url::Url::parse("magnet:?").unwrap();
@@ -1063,6 +1441,25 @@ impl Engine {
                     })
                     .unwrap_or((0, 0, json!({})));
                 let live_peers = peers["live"].as_u64().unwrap_or(0);
+                let peer_details = h
+                    .live()
+                    .map(|live| live.per_peer_stats_snapshot(Default::default()));
+                let attempts: u64 = peer_details
+                    .as_ref()
+                    .map(|p| {
+                        p.peers
+                            .values()
+                            .map(|p| u64::from(p.counters.connection_attempts))
+                            .sum()
+                    })
+                    .unwrap_or(0);
+                let connection_errors: u64 = peer_details
+                    .as_ref()
+                    .map(|p| p.peers.values().map(|p| u64::from(p.counters.errors)).sum())
+                    .unwrap_or(0);
+                item["connection_attempts"] = json!(attempts);
+                item["connection_errors"] = json!(connection_errors);
+                item["cached_peers"] = json!(e.initial_peers.len());
                 // The engine may be paused even when the saved intent is running.
                 let actually_paused =
                     h.is_paused() || matches!(stats.state, librqbit::TorrentStatsState::Paused);
@@ -1084,10 +1481,22 @@ impl Engine {
                     "下载完成，正在做种".into()
                 } else if down > 0 {
                     "正在接收数据".into()
+                } else if live_peers == 0 && attempts > 0 {
+                    format!(
+                        "已找到候选节点，累计尝试连接 {attempts} 次，节点错误 {connection_errors} 次，目前无连接；引擎继续重试。Tracker 报告数不代表可连接节点"
+                    )
                 } else if live_peers == 0 {
-                    "暂无对等连接，检查 Tracker 和资源活跃度".into()
+                    format!(
+                        "元数据已就绪，尚未观察到节点连接尝试；DHT {}，缓存节点 {}",
+                        if self.session.get_dht().is_some() {
+                            "已启用"
+                        } else {
+                            "关闭"
+                        },
+                        e.initial_peers.len()
+                    )
                 } else {
-                    "已连接，等待可用数据".into()
+                    "节点已连接但暂无数据：可能被对端限速或没有当前所需分片；引擎尚未提供可区分两者的指标".into()
                 };
                 if let Some(metadata) = h.metadata.load_full() {
                     item["media_files"] = json!(metadata.file_infos.iter().enumerate()
@@ -1118,9 +1527,9 @@ impl Engine {
                         let selected_files = h.only_files();
                         detail["files"]=json!(m.file_infos.iter().enumerate().map(|(i,f)|json!({"index":i,"path":f.relative_filename.display().to_string(),"size":f.len,"done":stats.file_progress.get(i).copied().unwrap_or(0),"selected":selected_files.as_ref().is_none_or(|s|s.contains(&i))})).collect::<Vec<_>>());
                     }
-                    if let Ok(p) = Api::new(self.session.clone(), None)
-                        .api_peer_stats(TorrentIdOrHash::Id(h.id()), Default::default())
-                    {
+                    // Session lookup takes its global DB lock, held while another
+                    // torrent opens all files. We already own this task's handle.
+                    if let Some(p) = peer_details {
                         detail["peers"]=json!(p.peers.into_iter().map(|(addr,p)|json!({"address":addr,"client":p.client_name.unwrap_or_default(),"downloaded":p.counters.fetched_bytes,"errors":p.counters.errors,"state":p.state})).collect::<Vec<_>>());
                     }
                 }
@@ -1348,11 +1757,23 @@ async fn settings(
     reply(result)
 }
 
+pub fn startup_stage(root: &Path, message: &str) {
+    let _ = std::fs::create_dir_all(root.join("data"));
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("data/startup.log"))
+    {
+        let _ = writeln!(file, "{} {}", trackers::now(), message);
+    }
+    let _ = atomic(&root.join("data/startup-stage.txt"), message.as_bytes());
+}
+
 pub async fn serve(
     root: PathBuf,
     token: String,
     offline: bool,
-    stop: oneshot::Receiver<()>,
+    mut stop: oneshot::Receiver<()>,
     ready: mpsc::SyncSender<std::result::Result<String, String>>,
 ) -> Result<()> {
     std::fs::create_dir_all(root.join("data"))?;
@@ -1362,8 +1783,12 @@ pub async fn serve(
         .create(true)
         .truncate(false)
         .open(root.join("data/engine.lock"))?;
+    startup_stage(&root, "获取任务目录锁");
     fs2::FileExt::try_lock_exclusive(&lock).context("此项目已有下载引擎运行，请先关闭原窗口")?;
-    let engine = Engine::new(&root, offline).await?;
+    let engine = tokio::select! {
+        result=Engine::new(&root,offline)=>result?,
+        _=&mut stop=>{startup_stage(&root,"初始化已取消");return Ok(());}
+    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let state_data = ApiState {
@@ -1371,6 +1796,7 @@ pub async fn serve(
         token,
     };
     let app = Router::new()
+        .route("/api/health", get(|| async { Json(json!({"ok":true})) }))
         .route("/api/state", get(state))
         .route("/api/tasks", post(add))
         .route("/api/action", post(action))
@@ -1417,20 +1843,38 @@ pub async fn serve(
         }
     });
     let snapshot_task = tokio::spawn(async move {
+        let mut sample = 0u32;
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
+            sample += 1;
+            if sample % 15 == 0 {
+                let _ = snapshots.remember_working_peers();
+            }
             let _ = atomic(
                 &snapshots.data.join("status.json"),
                 &serde_json::to_vec_pretty(&snapshots.snapshot("")).unwrap(),
             );
         }
     });
+    startup_stage(&root, "本机接口已就绪；任务在后台恢复");
     let _ = ready.send(Ok(format!("http://{addr}")));
-    axum::serve(listener, app)
+    use std::future::IntoFuture;
+    let (shutdown, stopped) = oneshot::channel::<()>();
+    let server = axum::serve(listener, app)
         .with_graceful_shutdown(async {
-            let _ = stop.await;
+            let _ = stopped.await;
         })
-        .await?;
+        .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result=&mut server=>result?,
+        _=&mut stop=>{
+            startup_stage(&root,"正在停止接口并保存任务");
+            let _=shutdown.send(());
+            // A player waiting for missing pieces must not hold shutdown forever.
+            let _=tokio::time::timeout(Duration::from_secs(3),&mut server).await;
+        }
+    }
     restore_task.abort();
     snapshot_task.abort();
     maintenance_task.abort();
@@ -1439,7 +1883,8 @@ pub async fn serve(
     for job in jobs {
         let _ = job.stop().await;
     }
-    engine.session.stop().await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), engine.session.stop()).await;
+    startup_stage(&root, "引擎已退出");
     drop(engine);
     drop(lock);
     Ok(())
@@ -1448,6 +1893,51 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_restore_uses_bitmap_without_opening_download_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path(), true).await.unwrap();
+        let mut torrent = b"d4:infod6:lengthi1e4:name1:x12:piece lengthi16384e6:pieces20:".to_vec();
+        torrent.extend_from_slice(&[0u8; 20]);
+        torrent.extend_from_slice(b"ee");
+        let parsed = librqbit::torrent_from_bytes(&torrent).unwrap();
+        std::fs::write(engine.data.join("fixture.torrent"), &torrent).unwrap();
+        let bitmap = engine
+            .data
+            .join("rqbit")
+            .join(format!("{:?}.bitv", parsed.info_hash));
+        std::fs::create_dir_all(bitmap.parent().unwrap()).unwrap();
+        let entry = Entry {
+            id: "fixture".into(),
+            source: "fixture.torrent".into(),
+            paused: true,
+            save_path: temp.path().join("downloads").display().to_string(),
+            ..Default::default()
+        };
+        std::fs::write(&bitmap, [0u8]).unwrap();
+        assert!(engine.cached_complete(&entry).is_err());
+        std::fs::write(&bitmap, [0x80u8]).unwrap();
+        engine.entries.lock().unwrap().push(entry);
+        engine.restore().await;
+        assert!(engine.handle("fixture").is_err());
+        let state = engine.snapshot("fixture");
+        assert_eq!(state["tasks"][0]["progress"], 1.0);
+        assert_eq!(state["detail"]["files"][0]["path"], "x");
+        assert!(!temp.path().join("downloads/x").exists());
+        engine.action("fixture", "pause", "").await.unwrap();
+        engine.action("fixture", "resume", "").await.unwrap();
+        assert!(engine.handle("fixture").is_err());
+        engine.session.stop().await;
+    }
+    #[test]
+    fn restore_cost_counts_files_not_piece_metadata_size() {
+        assert_eq!(metadata_size(b"d4:infod6:lengthi123eee").unwrap(), (1, 123));
+        assert_eq!(
+            metadata_size(b"d4:infod5:filesld6:lengthi10eed6:lengthi20eeeee").unwrap(),
+            (2, 30)
+        );
+        assert!(metadata_size(b"invalid").is_err());
+    }
     async fn wait(stage: &str, mut predicate: impl FnMut() -> bool) {
         tokio::time::timeout(Duration::from_secs(30), async {
             while !predicate() {
@@ -1510,6 +2000,36 @@ mod tests {
             .unwrap();
         seed_handle.wait_until_initialized().await.unwrap();
         assert!(seed_handle.stats().finished);
+        // A bare magnet must resolve using cached peers with DHT/public trackers disabled.
+        let magnet_root = root.join("magnet-client");
+        let magnet_client = Engine::new(&magnet_root, true).await.unwrap();
+        magnet_client.entries.lock().unwrap().push(Entry {
+            id: "magnet-fixture".into(),
+            source: format!(
+                "magnet:?xt=urn:btih:{}",
+                seed_handle.info_hash().as_string()
+            ),
+            save_path: magnet_root.join("downloads").display().to_string(),
+            paused: true,
+            initial_peers: vec![(std::net::Ipv4Addr::LOCALHOST, port).into()],
+            ..Default::default()
+        });
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            magnet_client.load("magnet-fixture"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(magnet_client.data.join("magnet-fixture.torrent").is_file());
+        assert!(
+            !magnet_client
+                .entry("magnet-fixture")
+                .unwrap()
+                .initial_peers
+                .is_empty()
+        );
+        magnet_client.session.stop().await;
         let download_root = root.join("client");
         std::fs::create_dir_all(&download_root).unwrap();
         let source = download_root.join("fixture.torrent");
@@ -1587,6 +2107,8 @@ mod tests {
             client.handle("local").unwrap().stats().progress_bytes > 1024 * 1024
         })
         .await;
+        client.remember_working_peers().unwrap();
+        assert!(client.entry("local").unwrap().peer_cache_updated > 0);
         client.action("local", "pause", "").await.unwrap();
         client.action("local", "pause", "").await.unwrap();
         assert!(client.handle("local").unwrap().is_paused());

@@ -29,6 +29,14 @@ impl Default for Config {
             Source { name: "ngosang".into(), enabled: true, urls: vec![
                 "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt".into(),
                 "https://ngosang.github.io/trackerslist/trackers_best.txt".into()] },
+            Source { name: "newTrackon".into(), enabled: true, urls: vec![
+                "https://newtrackon.com/api/stable".into()] },
+            Source { name: "animeTrackerList".into(), enabled: true, urls: vec![
+                "https://cdn.jsdelivr.net/gh/DeSireFire/animeTrackerList@master/ATline_best.txt".into(),
+                "https://raw.githubusercontent.com/DeSireFire/animeTrackerList/master/ATline_best.txt".into()] },
+            Source { name: "OpenTracker".into(), enabled: true, urls: vec![
+                "https://raw.githubusercontent.com/1265578519/OpenTracker/master/tracker.txt".into(),
+                "https://cdn.jsdelivr.net/gh/1265578519/OpenTracker@master/tracker.txt".into()] },
         ] }
     }
 }
@@ -91,14 +99,32 @@ fn write(path: &Path, value: &impl Serialize) -> Result<()> {
 impl Catalog {
     pub fn open(path: &Path) -> Result<Self> {
         let file = path.join("tracker-sources.json");
-        let config: Config = if file.exists() {
+        let mut config: Config = if file.exists() {
             serde_json::from_slice(&std::fs::read(&file)?)
                 .context("tracker-sources.json 格式错误")?
         } else {
             Config::default()
         };
         config.validate()?;
+        // One-time upgrade: preserve custom sources and disabled entries. Deletions after
+        // this migration are intentional and must not be undone on the next launch.
+        let migration = path.join("tracker-defaults-v040.json");
+        if !migration.exists() {
+            for source in Config::default().sources.into_iter().skip(2) {
+                if config.sources.len() < 16
+                    && !config.sources.iter().any(|existing| {
+                        existing.name.eq_ignore_ascii_case(&source.name)
+                            || existing.urls.iter().any(|url| source.urls.contains(url))
+                    })
+                {
+                    config.sources.push(source);
+                }
+            }
+        }
         write(&file, &config)?;
+        if !migration.exists() {
+            write(&migration, &true)?;
+        }
         let cache = std::fs::read(path.join("tracker-cache.json"))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -128,58 +154,41 @@ impl Catalog {
         let config = self.config.lock().unwrap().clone();
         let mut all = BTreeMap::new();
         let mut notes = Vec::new();
-        for source in config.sources.iter().filter(|s| s.enabled) {
-            // Key includes mirrors, so editing an endpoint cannot reuse a different subscription's cache.
+        let mut jobs = tokio::task::JoinSet::new();
+        for source in config.sources.into_iter().filter(|s| s.enabled) {
+            // A source's mirrors form part of its cache identity.
             let key = format!("{}|{}", source.name, source.urls.join("|"));
-            let mut cache = self
+            let cache = self
                 .cache
                 .lock()
                 .unwrap()
                 .get(&key)
                 .cloned()
                 .unwrap_or_default();
-            if now() >= cache.retry_at
-                && (cache.updated == 0
-                    || now().saturating_sub(cache.updated) >= config.refresh_hours * 3600)
-            {
-                let mut success = None;
-                let mut failures = Vec::new();
-                for endpoint in &source.urls {
-                    match fetch(client, endpoint).await {
-                        Ok(urls) => {
-                            success = Some(urls);
-                            cache.message = format!("{}：已更新（{}）", source.name, endpoint);
-                            break;
+            let client = client.clone();
+            let refresh_hours = config.refresh_hours;
+            jobs.spawn(async move {
+                let cache = refresh_source(&client, &source, cache, refresh_hours).await;
+                (key, source.name, cache)
+            });
+        }
+        while let Some(result) = jobs.join_next().await {
+            match result {
+                Ok((key, name, cache)) => {
+                    notes.push(cache.message.clone());
+                    for tracker in &cache.urls {
+                        // Stable attribution even when requests finish in a different order.
+                        let owner = all.entry(tracker.clone()).or_insert_with(|| name.clone());
+                        if name < *owner {
+                            *owner = name.clone();
                         }
-                        Err(e) => failures.push(format!("{endpoint}: {e}")),
                     }
+                    self.cache.lock().unwrap().insert(key, cache);
                 }
-                if let Some(urls) = success {
-                    cache.urls = urls;
-                    cache.updated = now();
-                    cache.failures = 0;
-                    cache.retry_at = 0;
-                } else {
-                    cache.failures = cache.failures.saturating_add(1);
-                    cache.retry_at = now() + (300u64 * 2u64.pow(cache.failures.min(7))).min(21600);
-                    cache.message = format!(
-                        "{}：所有镜像失败，{}；稍后重试。{}",
-                        source.name,
-                        if cache.urls.is_empty() {
-                            "暂无缓存"
-                        } else {
-                            "沿用上次成功缓存"
-                        },
-                        failures.join("；")
-                    );
-                }
-                self.cache.lock().unwrap().insert(key, cache.clone());
-            }
-            notes.push(cache.message.clone());
-            for tracker in cache.urls {
-                all.entry(tracker).or_insert(source.name.clone());
+                Err(error) => notes.push(format!("订阅刷新失败：{error}")),
             }
         }
+        notes.sort();
         if let Err(e) = write(
             &self.path.join("tracker-cache.json"),
             &*self.cache.lock().unwrap(),
@@ -189,6 +198,59 @@ impl Catalog {
         (all, notes)
     }
 }
+async fn refresh_source(
+    client: &reqwest::Client,
+    source: &Source,
+    mut cache: Cache,
+    refresh_hours: u64,
+) -> Cache {
+    if now() < cache.retry_at
+        || (cache.updated != 0 && now().saturating_sub(cache.updated) < refresh_hours * 3600)
+    {
+        return cache;
+    }
+    // All sources run independently; a complete mirror chain has a bounded budget.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        let mut failures = Vec::new();
+        for endpoint in &source.urls {
+            match fetch(client, endpoint).await {
+                Ok(urls) => return Ok((urls, endpoint.clone())),
+                Err(error) => failures.push(format!("{endpoint}: {error}")),
+            }
+        }
+        Err(failures.join("；"))
+    })
+    .await;
+    match result {
+        Ok(Ok((urls, endpoint))) => {
+            cache.urls = urls;
+            cache.updated = now();
+            cache.failures = 0;
+            cache.retry_at = 0;
+            cache.message = format!("{}：已更新（{}）", source.name, endpoint);
+        }
+        failure => {
+            let reason = match failure {
+                Ok(Err(reason)) => reason,
+                _ => "订阅刷新超过 12 秒".into(),
+            };
+            cache.failures = cache.failures.saturating_add(1);
+            cache.retry_at = now() + (300u64 * 2u64.pow(cache.failures.min(7))).min(21600);
+            cache.message = format!(
+                "{}：刷新失败，{}；稍后重试。{}",
+                source.name,
+                if cache.urls.is_empty() {
+                    "暂无缓存"
+                } else {
+                    "沿用上次成功缓存"
+                },
+                reason
+            );
+        }
+    }
+    cache
+}
+
 async fn fetch(client: &reqwest::Client, endpoint: &str) -> Result<Vec<String>> {
     let mut r = client
         .get(endpoint)
@@ -215,10 +277,89 @@ async fn fetch(client: &reqwest::Client, endpoint: &str) -> Result<Vec<String>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn upgrade_preserves_settings_and_does_not_readd_deleted_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.refresh_hours = 48;
+        config
+            .sources
+            .retain(|s| s.name == "XIU2" || s.name == "newTrackon");
+        config.sources[1].enabled = false;
+        config.sources.push(Source {
+            name: "custom".into(),
+            enabled: true,
+            urls: vec!["https://example.com/list.txt".into()],
+        });
+        write(&dir.path().join("tracker-sources.json"), &config).unwrap();
+        let catalog = Catalog::open(dir.path()).unwrap();
+        let mut migrated = catalog.config.lock().unwrap().clone();
+        assert_eq!(migrated.refresh_hours, 48);
+        assert_eq!(migrated.sources.len(), 5);
+        assert!(
+            !migrated
+                .sources
+                .iter()
+                .find(|s| s.name == "newTrackon")
+                .unwrap()
+                .enabled
+        );
+        assert!(!migrated.sources.iter().any(|s| s.name == "ngosang"));
+        migrated.sources.retain(|s| s.name != "OpenTracker");
+        write(&dir.path().join("tracker-sources.json"), &migrated).unwrap();
+        drop(catalog);
+        let reopened = Catalog::open(dir.path()).unwrap();
+        assert_eq!(reopened.config.lock().unwrap().sources.len(), 4);
+    }
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+    #[tokio::test]
+    async fn sources_refresh_concurrently_and_deduplicate() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/list", listener.local_addr().unwrap());
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let app = axum::Router::new().route(
+            "/list",
+            axum::routing::get(move || {
+                let barrier = barrier.clone();
+                async move {
+                    barrier.wait().await;
+                    "udp://tracker.example:80/announce\nudp://tracker.example:80/announce"
+                }
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = Catalog::open(dir.path()).unwrap();
+        catalog
+            .save(Config {
+                sources: ["B", "A"]
+                    .into_iter()
+                    .map(|name| Source {
+                        name: name.into(),
+                        enabled: true,
+                        urls: vec![endpoint.clone()],
+                    })
+                    .collect(),
+                ..Config::default()
+            })
+            .await
+            .unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let (found, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            catalog.candidates(&client),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found.values().next().unwrap(), "A");
+        server.abort();
+    }
     #[tokio::test]
     async fn mirror_fallback_cache_survives_failure_restart_and_disable() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

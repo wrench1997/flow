@@ -8,10 +8,11 @@ pub struct Backend {
     pub root: PathBuf,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<thread::JoinHandle<()>>,
+    ready: Option<mpsc::Receiver<Result<String, String>>>,
 }
 
 impl Backend {
-    pub fn start() -> Result<Self, String> {
+    pub fn root() -> Result<PathBuf, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let parent = exe.parent().ok_or("无法定位程序目录")?;
         let is_build = parent
@@ -27,10 +28,50 @@ impl Backend {
             parent
         }
         .to_path_buf();
-        Self::start_in(root, false)
+        Ok(root)
+    }
+
+    pub fn start() -> Result<Self, String> {
+        Self::start_in(Self::root()?, false)
     }
 
     pub fn start_in(root: PathBuf, offline: bool) -> Result<Self, String> {
+        let mut backend = Self::launch_in(root, offline)?;
+        let result = backend
+            .ready
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(30));
+        match result {
+            Ok(Ok(base)) => {
+                backend.base = base;
+                backend.ready = None;
+                Ok(backend)
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err("Rust 下载引擎启动超时".into()),
+        }
+    }
+    pub fn poll_ready(&mut self) -> Option<Result<(), String>> {
+        let ready = self.ready.as_ref()?;
+        match ready.try_recv() {
+            Ok(Ok(base)) => {
+                self.base = base;
+                self.ready = None;
+                Some(Ok(()))
+            }
+            Ok(Err(error)) => {
+                self.ready = None;
+                Some(Err(error))
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.ready = None;
+                Some(Err("引擎初始化线程意外退出，请查看启动日志".into()))
+            }
+        }
+    }
+    pub fn launch_in(root: PathBuf, offline: bool) -> Result<Self, String> {
         let token = uuid::Uuid::new_v4().simple().to_string();
         let (stop, stopped) = oneshot::channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -45,7 +86,7 @@ impl Backend {
                 Ok(rt) => {
                     rt.block_on(async {
                         if let Err(e) = crate::engine::serve(
-                            backend_root,
+                            backend_root.clone(),
                             backend_token,
                             offline,
                             stopped,
@@ -53,6 +94,10 @@ impl Backend {
                         )
                         .await
                         {
+                            crate::engine::startup_stage(
+                                &backend_root,
+                                &format!("启动失败：{e:#}"),
+                            );
                             let _ = ready_tx.send(Err(format!("{e:#}")));
                         }
                     });
@@ -63,23 +108,14 @@ impl Backend {
                 }
             }
         });
-        match ready_rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(Ok(base)) => Ok(Self {
-                base,
-                token,
-                root,
-                stop: Some(stop),
-                worker: Some(worker),
-            }),
-            other => {
-                let _ = stop.send(());
-                let error = match other {
-                    Ok(Err(e)) => e,
-                    _ => "Rust 下载引擎启动超时".into(),
-                };
-                Err(error)
-            }
-        }
+        Ok(Self {
+            base: String::new(),
+            token,
+            root,
+            stop: Some(stop),
+            worker: Some(worker),
+            ready: Some(ready_rx),
+        })
     }
 }
 
@@ -98,6 +134,54 @@ impl Drop for Backend {
 mod tests {
     use super::*;
     #[test]
+    fn corrupt_settings_report_error_and_retry_preserves_data() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("data")).unwrap();
+        let settings = temp.path().join("data/settings.json");
+        std::fs::write(&settings, b"broken configuration").unwrap();
+        assert!(Backend::start_in(temp.path().into(), true).is_err());
+        assert_eq!(std::fs::read(&settings).unwrap(), b"broken configuration");
+        std::fs::write(
+            &settings,
+            serde_json::to_vec(&crate::settings::Settings::defaults(temp.path())).unwrap(),
+        )
+        .unwrap();
+        let backend = Backend::start_in(temp.path().into(), true).unwrap();
+        drop(backend);
+    }
+    #[test]
+    fn stale_derived_index_does_not_block_startup_and_is_backed_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir_all(data.join("rqbit")).unwrap();
+        std::fs::write(data.join("tasks-rust.json"), b"[]").unwrap();
+        std::fs::write(data.join("rqbit/session.json"), b"stale engine index").unwrap();
+        let bitmap = data.join("rqbit/fixture.bitv");
+        std::fs::write(&bitmap, b"preserve resume state").unwrap();
+        let backend = Backend::start_in(temp.path().into(), true).unwrap();
+        assert!(
+            std::fs::read_dir(data.join("rqbit"))
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .any(|e| e
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("session-startup-")
+                    && std::fs::read(e.path()).unwrap() == b"stale engine index")
+        );
+        assert_eq!(std::fs::read(bitmap).unwrap(), b"preserve resume state");
+        drop(backend);
+    }
+    #[test]
+    fn cancel_initialization_releases_lock_for_next_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        drop(Backend::launch_in(temp.path().into(), true).unwrap());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let backend = Backend::start_in(temp.path().into(), true).unwrap();
+        drop(backend);
+    }
+    #[test]
     fn starts_authenticates_rejects_duplicate_and_stops() {
         let temp = tempfile::tempdir().unwrap();
         let backend = Backend::start_in(temp.path().into(), true).unwrap();
@@ -108,6 +192,17 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(client.get(&url).send().unwrap().status(), 401);
+        let health = format!("{}/api/health", backend.base);
+        assert_eq!(client.get(&health).send().unwrap().status(), 401);
+        assert!(
+            client
+                .get(&health)
+                .bearer_auth(&backend.token)
+                .send()
+                .unwrap()
+                .status()
+                .is_success()
+        );
         let snapshot: serde_json::Value = client
             .get(&url)
             .bearer_auth(&backend.token)

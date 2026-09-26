@@ -61,7 +61,7 @@ impl Tray {
         })
     }
 }
-fn wake_window(native: isize) {
+pub(crate) fn wake_window(native: isize) {
     #[cfg(windows)]
     {
         #[link(name = "user32")]

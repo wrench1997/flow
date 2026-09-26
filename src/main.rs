@@ -5,6 +5,7 @@ mod engine;
 mod file_ops;
 mod http_download;
 mod media;
+mod open_request;
 mod player;
 mod settings;
 mod subscriptions;
@@ -16,26 +17,44 @@ use serde_json::{Value, json};
 use std::{sync::mpsc, thread, time::Duration};
 
 enum Command {
+    RemoveMany(Vec<String>, String),
+    Retry,
+    Shutdown,
     Select(String),
     Play(String, usize, String),
     Post(&'static str, Value),
 }
 enum Event {
+    BatchProgress(usize, usize),
+    Starting(String),
+    StartupFailed(String),
+    Duplicate,
+    Show,
     State(Value),
+    RefreshFailed(bool, String),
     Error(String),
     Done,
     Play(String, String, String),
     PlayError(String),
+    Open(String),
 }
 
 struct DownloadApp {
+    clipboard_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    clipboard_worker: Option<thread::JoinHandle<()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    starting: bool,
     player: player::Player,
     media_choice: Option<(String, Vec<Value>)>,
+    pending_open: std::collections::VecDeque<String>,
     tray: Option<tray::Tray>,
     exit_requested: bool,
     add_paused: bool,
     remove_mode: String,
-    remove_target: String,
+    remove_targets: Vec<String>,
+    selection: std::collections::BTreeSet<String>,
+    selection_anchor: Option<egui::Pos2>,
+    selection_base: std::collections::BTreeSet<String>,
     file_edit: Option<(String, std::collections::BTreeSet<usize>)>,
     history: std::collections::BTreeMap<String, std::collections::VecDeque<[f64; 3]>>,
     sample_clock: std::time::Instant,
@@ -96,7 +115,7 @@ fn task_progress(ui: &mut egui::Ui, task: &Value) {
     };
     let color = if !text(task, "error").is_empty() {
         Color32::from_rgb(208, 89, 89)
-    } else if task["paused"] == true {
+    } else if task["paused"] == true && progress < 1.0 {
         Color32::from_rgb(138, 149, 163)
     } else {
         Color32::from_rgb(24, 157, 140)
@@ -114,6 +133,8 @@ fn task_progress(ui: &mut egui::Ui, task: &Value) {
         egui::Align2::RIGHT_CENTER,
         if checking {
             "校验中".into()
+        } else if text(task, "state") == "loading" {
+            "恢复中".into()
         } else {
             format!("{:.1}%", progress * 100.0)
         },
@@ -151,13 +172,7 @@ fn status(t: &Value) -> &str {
 }
 
 impl DownloadApp {
-    fn new(
-        cc: &eframe::CreationContext<'_>,
-        base: String,
-        token: String,
-        root: std::path::PathBuf,
-        startup_error: String,
-    ) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, root: std::path::PathBuf) -> Self {
         let mut fonts = egui::FontDefinitions::default();
         for path in ["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf"] {
             if let Ok(data) = std::fs::read(path) {
@@ -185,94 +200,291 @@ impl DownloadApp {
         let (tx, commands) = mpsc::channel();
         let (events, rx) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
-        thread::spawn(move || {
-            if !startup_error.is_empty() {
-                let _ = events.send(Event::Error(startup_error));
-                ctx.request_repaint();
-                return;
-            }
-            let client = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(4))
-                .no_proxy()
-                .build()
-                .unwrap();
-            let mut selected = String::new();
-            loop {
-                match commands.recv_timeout(Duration::from_millis(800)) {
-                    Ok(Command::Select(id)) => selected = id,
-                    Ok(Command::Play(id, index, title)) => {
-                        let result = client
-                            .post(format!("{base}/api/play"))
-                            .bearer_auth(&token)
-                            .json(&json!({"id":id,"index":index}))
-                            .send()
-                            .and_then(|r| r.json::<Value>());
-                        match result {
-                            Ok(v) if v["path"].is_string() => {
-                                let _ = events.send(Event::Play(
-                                    format!("{}{}", base, text(&v, "path")),
-                                    title,
-                                    token.clone(),
-                                ));
+        let request_root = root.clone();
+        use raw_window_handle::HasWindowHandle;
+        let native = cc
+            .window_handle()
+            .ok()
+            .and_then(|h| match h.as_raw() {
+                raw_window_handle::RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let clipboard_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let clipboard_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            std::fs::read(root.join("data/settings.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<settings::Settings>(&b).ok())
+                .is_none_or(|s| s.clipboard_watch),
+        ));
+        let clipboard_worker = {
+            let stop = clipboard_stop.clone();
+            let enabled = clipboard_enabled.clone();
+            let events = events.clone();
+            let ctx = ctx.clone();
+            thread::spawn(move || {
+                let mut clipboard = None;
+                // Ignore clipboard contents from before Flow was launched.
+                // A fresh copy advances the Windows sequence even for identical text.
+                let mut sequence = open_request::clipboard_sequence();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let current = open_request::clipboard_sequence();
+                    if current != sequence {
+                        if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                            sequence = current;
+                        } else {
+                            if clipboard.is_none() {
+                                clipboard = arboard::Clipboard::new().ok();
                             }
-                            Ok(v) => {
-                                let _ = events.send(Event::PlayError(text(&v, "error")));
-                            }
-                            Err(e) => {
-                                let _ = events.send(Event::PlayError(e.to_string()));
-                            }
-                        }
-                    }
-
-                    Ok(Command::Post(path, data)) => {
-                        let result = client
-                            .post(format!("{base}{path}"))
-                            .bearer_auth(&token)
-                            .json(&data)
-                            .send()
-                            .and_then(|r| r.json::<Value>());
-                        match result {
-                            Ok(v) if v.get("error").is_none() => {
-                                let _ = events.send(Event::Done);
-                            }
-                            Ok(v) => {
-                                let _ = events.send(Event::Error(text(&v, "error")));
-                            }
-                            Err(e) => {
-                                let _ = events.send(Event::Error(e.to_string()));
+                            if let Some(value) = clipboard
+                                .as_mut()
+                                .and_then(|c: &mut arboard::Clipboard| c.get_text().ok())
+                            {
+                                sequence = current;
+                                if let Some(source) = open_request::copied_magnet(&value) {
+                                    if events.send(Event::Open(source)).is_err() {
+                                        break;
+                                    }
+                                    tray::wake_window(native);
+                                    ctx.request_repaint();
+                                }
                             }
                         }
                     }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    thread::sleep(Duration::from_millis(200));
                 }
-                let response = client
-                    .get(format!("{base}/api/state"))
-                    .query(&[("selected", &selected)])
-                    .bearer_auth(&token)
-                    .send()
-                    .and_then(|r| r.error_for_status())
-                    .and_then(|r| r.json::<Value>());
-                let event = match response {
-                    Ok(state) => Event::State(state),
-                    Err(e) => {
-                        Event::Error(format!("内置引擎连接失败，请查看启动错误或重启 Flow。{e}"))
+            })
+        };
+        let worker = thread::spawn(move || {
+            'startup: loop {
+                let _ = events.send(Event::Starting("正在启动下载引擎…".into()));
+                ctx.request_repaint();
+                let mut backend = match backend::Backend::launch_in(request_root.clone(), false) {
+                    Ok(backend) => backend,
+                    Err(error) => {
+                        let _ = events.send(Event::StartupFailed(error));
+                        ctx.request_repaint();
+                        return;
                     }
                 };
-                if events.send(event).is_err() {
-                    break;
+                let mut last_stage = String::new();
+                loop {
+                    if let Some(result) = backend.poll_ready() {
+                        match result {
+                            Ok(()) => break,
+                            Err(error) => {
+                                if error.contains("此项目已有下载引擎运行") {
+                                    let _ = std::fs::write(
+                                        request_root.join("data/show-window.request"),
+                                        b"show",
+                                    );
+                                    let _ = events.send(Event::Duplicate);
+                                    ctx.request_repaint();
+                                    return;
+                                }
+                                let _ = events.send(Event::StartupFailed(error));
+                                ctx.request_repaint();
+                                drop(backend);
+                                loop {
+                                    match commands.recv() {
+                                        Ok(Command::Retry) => continue 'startup,
+                                        Ok(Command::Shutdown) | Err(_) => return,
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let stage =
+                        std::fs::read_to_string(request_root.join("data/startup-stage.txt"))
+                            .unwrap_or_else(|_| "正在初始化引擎…".into());
+                    if stage != last_stage {
+                        last_stage = stage.clone();
+                        let _ = events.send(Event::Starting(stage));
+                        ctx.request_repaint();
+                    }
+                    match commands.recv_timeout(Duration::from_millis(100)) {
+                        Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                        Ok(Command::Retry) => {
+                            drop(backend);
+                            continue 'startup;
+                        }
+                        _ => {}
+                    }
                 }
-                ctx.request_repaint();
+                let base = backend.base.clone();
+                let token = backend.token.clone();
+
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(4))
+                    .no_proxy()
+                    .build()
+                    .unwrap();
+                let mut selected = String::new();
+                loop {
+                    let show = request_root.join("data/show-window.request");
+                    if show.exists() {
+                        let _ = std::fs::remove_file(show);
+                        tray::wake_window(native);
+                        let _ = events.send(Event::Show);
+                        ctx.request_repaint();
+                    }
+                    match open_request::take(&request_root) {
+                        Ok(Some(source)) => {
+                            if events.send(Event::Open(source)).is_err() {
+                                break;
+                            }
+                            tray::wake_window(native);
+                            ctx.request_repaint();
+                        }
+                        Err(error) => {
+                            let _ = events.send(Event::Error(error.to_string()));
+                        }
+                        _ => {}
+                    }
+                    match commands.recv_timeout(Duration::from_millis(800)) {
+                        Ok(Command::Shutdown) => return,
+                        Ok(Command::Retry) => {
+                            drop(backend);
+                            continue 'startup;
+                        }
+                        Ok(Command::Select(id)) => selected = id,
+                        Ok(Command::Play(id, index, title)) => {
+                            let result = client
+                                .post(format!("{base}/api/play"))
+                                .bearer_auth(&token)
+                                .json(&json!({"id":id,"index":index}))
+                                .send()
+                                .and_then(|r| r.json::<Value>());
+                            match result {
+                                Ok(v) if v["path"].is_string() => {
+                                    let _ = events.send(Event::Play(
+                                        format!("{}{}", base, text(&v, "path")),
+                                        title,
+                                        token.clone(),
+                                    ));
+                                }
+                                Ok(v) => {
+                                    let _ = events.send(Event::PlayError(text(&v, "error")));
+                                }
+                                Err(e) => {
+                                    let _ = events.send(Event::PlayError(e.to_string()));
+                                }
+                            }
+                        }
+
+                        Ok(Command::RemoveMany(ids, mode)) => {
+                            let mut failed = Vec::new();
+                            let total = ids.len();
+                            for (index, id) in ids.into_iter().enumerate() {
+                                let _ = events.send(Event::BatchProgress(index + 1, total));
+                                ctx.request_repaint();
+                                let result = client
+                                    .post(format!("{base}/api/action"))
+                                    .bearer_auth(&token)
+                                    .timeout(Duration::from_secs(60))
+                                    .json(&json!({"id":id,"action":"remove","delete_mode":mode}))
+                                    .send()
+                                    .and_then(|r| r.json::<Value>());
+                                match result {
+                                    Ok(v) if v.get("error").is_none() => {}
+                                    Ok(v) => failed.push(format!("{id}: {}", text(&v, "error"))),
+                                    Err(e) => failed
+                                        .push(format!("{id}: {e}（未自动重试，请刷新后确认结果）")),
+                                }
+                            }
+                            let message = if failed.is_empty() {
+                                format!("已移除 {total} 个任务")
+                            } else {
+                                format!(
+                                    "{total} 个任务中有 {} 项未能确认删除：{}",
+                                    failed.len(),
+                                    failed.join("；")
+                                )
+                            };
+                            let _ = events.send(Event::Error(message));
+                        }
+                        Ok(Command::Post(path, data)) => {
+                            let result = client
+                                .post(format!("{base}{path}"))
+                                .bearer_auth(&token)
+                                .json(&data)
+                                .send()
+                                .and_then(|r| r.json::<Value>());
+                            match result {
+                                Ok(v) if v.get("error").is_none() => {
+                                    let _ = events.send(Event::Done);
+                                }
+                                Ok(v) => {
+                                    let _ = events.send(Event::Error(text(&v, "error")));
+                                }
+                                Err(e) => {
+                                    let _ = events.send(Event::Error(e.to_string()));
+                                }
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                    let response = client
+                        .get(format!("{base}/api/state"))
+                        .query(&[("selected", &selected)])
+                        .bearer_auth(&token)
+                        .send()
+                        .and_then(|r| r.error_for_status())
+                        .and_then(|r| r.json::<Value>());
+                    let event = match response {
+                        Ok(state) => {
+                            clipboard_enabled.store(
+                                state["settings"]["clipboard_watch"]
+                                    .as_bool()
+                                    .unwrap_or(true),
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            Event::State(state)
+                        }
+                        Err(e) => {
+                            let alive = client
+                                .get(format!("{base}/api/health"))
+                                .bearer_auth(&token)
+                                .timeout(Duration::from_secs(2))
+                                .send()
+                                .and_then(|r| r.error_for_status())
+                                .is_ok();
+                            Event::RefreshFailed(
+                                alive,
+                                if alive {
+                                    format!("引擎仍在运行，状态刷新暂时失败，正在自动重试。{e}")
+                                } else {
+                                    format!("引擎暂时无响应，正在自动重连。{e}")
+                                },
+                            )
+                        }
+                    };
+                    if events.send(event).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+                return;
             }
         });
         Self {
+            clipboard_stop,
+            clipboard_worker: Some(clipboard_worker),
+            worker: Some(worker),
+            starting: true,
             player: player::Player::new(root.clone()),
             media_choice: None,
+            pending_open: Default::default(),
             tray: tray::Tray::new(cc).ok(),
             exit_requested: false,
             add_paused: false,
             remove_mode: "keep".into(),
-            remove_target: String::new(),
+            remove_targets: Vec::new(),
+            selection: Default::default(),
+            selection_anchor: None,
+            selection_base: Default::default(),
             file_edit: None,
             history: Default::default(),
             sample_clock: std::time::Instant::now(),
@@ -341,7 +553,23 @@ impl DownloadApp {
         self.add_open = true;
     }
     fn open_remove(&mut self) {
-        self.remove_target = self.selected.clone();
+        if self.pending_action {
+            return;
+        }
+        self.remove_targets = list(&self.state["tasks"])
+            .iter()
+            .filter(|t| {
+                matches_filter(t, self.filter)
+                    && text(t, "name")
+                        .to_lowercase()
+                        .contains(&self.search.to_lowercase())
+            })
+            .filter(|t| self.selection.contains(&text(t, "id")))
+            .map(|t| text(t, "id"))
+            .collect();
+        if self.remove_targets.is_empty() {
+            return;
+        }
         self.remove_mode = "keep".into();
         self.remove_open = true;
     }
@@ -508,7 +736,7 @@ impl DownloadApp {
                         if text(&t,"kind") == "http" { ui.label("HTTP 直链任务不使用 Tracker。"); return; }
                         ui.horizontal(|ui| {
                             let running = self.state["detail"]["discovery"]["running"].as_bool().unwrap_or(false);
-                            if ui.add_enabled(!running, egui::Button::new(if running {"正在发现…"} else {"智能发现与评分"})).clicked() {self.action("discover");}
+                            if ui.add_enabled(!running, egui::Button::new(if running {"正在发现…"} else {"发现与健康检查"})).clicked() {self.action("discover");}
                             if ui.button("添加 Tracker…").clicked() {self.tracker_open = true;}
                             if ui.button("订阅设置…").clicked() {
                                 self.subscription_edit = serde_json::from_value(self.state["subscriptions"]["config"].clone()).ok();
@@ -517,9 +745,9 @@ impl DownloadApp {
                             if ui.button("应用候选（重新校验）").clicked() {self.action("apply_trackers");}
                         });
                         ui.label(text(&self.state["detail"]["discovery"], "message"));
-                        ui.weak("按当前资源 scrape 查询评分 · 做种数为服务器报告，非已连接人数 · 查询失败不等于不能下载 · — 表示无新鲜样本");
+                        ui.weak("健康分仅衡量 Tracker 响应，不代表下载速度；报告做种数只占少量权重。实际有效节点按已传输数据缓存，无法可靠归因到单个 Tracker。");
                         egui::Grid::new("trackers").striped(true).num_columns(8).show(ui, |ui| {
-                            for title in ["评分", "Tracker 地址", "报告做种数", "响应耗时", "成功 / 失败", "来源", "状态", "响应 / 错误原因"] {ui.strong(title);} ui.end_row();
+                            for title in ["健康分", "Tracker 地址", "报告做种数", "响应耗时", "成功 / 失败", "来源", "状态", "响应 / 错误原因"] {ui.strong(title);} ui.end_row();
                             for t in list(&self.state["detail"]["trackers"]) {
                                 ui.label(if t["score"].is_number() {format!("{:.1}",num(&t,"score"))} else {"—".into()});
                                 ui.label(text(&t,"url"));
@@ -566,6 +794,7 @@ impl eframe::App for DownloadApp {
         }
         if ctx.input(|i| i.viewport().close_requested())
             && !self.exit_requested
+            && self.connected
             && self.tray.is_some()
             && self.state["settings"]["background_on_close"]
                 .as_bool()
@@ -576,6 +805,34 @@ impl eframe::App for DownloadApp {
         }
         while let Ok(event) = self.rx.try_recv() {
             match event {
+                Event::Starting(message) => {
+                    self.starting = true;
+                    self.connected = false;
+                    self.message = message;
+                }
+                Event::StartupFailed(message) => {
+                    self.starting = false;
+                    self.connected = false;
+                    self.message = message;
+                }
+                Event::Duplicate => {
+                    self.exit_requested = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Event::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                Event::Open(source) => {
+                    if !(self.add_open && self.source == source)
+                        && !self.pending_open.contains(&source)
+                    {
+                        self.pending_open.push_back(source);
+                    }
+                }
+                Event::BatchProgress(index, total) => {
+                    self.message = format!("正在移除任务 {index}/{total}…");
+                }
                 Event::PlayError(error) => {
                     self.player.message = error;
                     self.player.open = true;
@@ -585,6 +842,13 @@ impl eframe::App for DownloadApp {
                     self.player.play(source, title, Some(&token));
                 }
                 Event::State(v) => {
+                    if self.starting
+                        || self.message.starts_with("引擎仍在运行")
+                        || self.message.starts_with("引擎暂时无响应")
+                    {
+                        self.message.clear();
+                    }
+                    self.starting = false;
                     let elapsed = self.sample_clock.elapsed().as_secs_f64();
                     if elapsed - self.last_sample >= 1.0 {
                         self.last_sample = elapsed;
@@ -619,15 +883,37 @@ impl eframe::App for DownloadApp {
                     }
                     self.message = e;
                 }
+                Event::RefreshFailed(alive, message) => {
+                    self.connected = alive;
+                    self.message = message;
+                }
                 Event::Done => {
                     self.pending_action = false;
                     self.message = "操作成功".into();
                 }
             }
         }
+        if !self.add_open {
+            if let Some(source) = self.pending_open.pop_front() {
+                self.new_task();
+                self.source = source;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
         let tasks = list(&self.state["tasks"]);
+        self.selection.retain(|id| {
+            tasks.iter().any(|t| {
+                text(t, "id") == *id
+                    && matches_filter(t, self.filter)
+                    && text(t, "name")
+                        .to_lowercase()
+                        .contains(&self.search.to_lowercase())
+            })
+        });
         if self.selected.is_empty() && !tasks.is_empty() {
             self.selected = text(&tasks[0], "id");
+            self.selection.insert(self.selected.clone());
             let _ = self.tx.send(Command::Select(self.selected.clone()));
         }
         let has_selection = tasks.iter().any(|t| text(t, "id") == self.selected);
@@ -678,6 +964,14 @@ impl eframe::App for DownloadApp {
                 }
                 if ui.button("播放器…").clicked() {
                     self.player.open = true;
+                }
+                if ui
+                    .button("退出程序")
+                    .on_hover_text("停止下载并完全退出，包括后台引擎")
+                    .clicked()
+                {
+                    self.exit_requested = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 ui.add_enabled_ui(self.connected && has_selection, |ui| {
                     if ui
@@ -740,9 +1034,17 @@ impl eframe::App for DownloadApp {
                     if self.connected {
                         "● 引擎已连接"
                     } else {
-                        "● 引擎未连接"
+                        if self.starting {
+                            "● 引擎启动中"
+                        } else {
+                            "● 引擎未连接"
+                        }
                     },
                 );
+                if !self.connected && !self.starting && ui.button("重试启动").clicked() {
+                    self.starting = true;
+                    let _ = self.tx.send(Command::Retry);
+                }
                 ui.separator();
                 ui.label(text(&self.state, "engine"));
                 ui.separator();
@@ -786,7 +1088,7 @@ impl eframe::App for DownloadApp {
                 ui.label("BT / HTTP(S)");
                 ui.add_space(12.0);
                 ui.weak(
-                    "自动保存续传状态\n删除时选择文件范围\n右键任务：更多操作\n空格：暂停 / 继续",
+                    "自动保存续传状态\nCtrl + 左键：多选任务\n右键 / Delete：批量删除\n空格：暂停 / 继续",
                 );
             });
         egui::TopBottomPanel::bottom("detail_panel")
@@ -797,12 +1099,30 @@ impl eframe::App for DownloadApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(["全部任务", "下载中", "已暂停", "已完成", "错误"][self.filter]);
-                ui.weak(format!("{} 个任务", tasks.len()));
+                if !self.selection.is_empty() { ui.label(format!("已选 {} 项",self.selection.len())); }
+                ui.weak(format!("{} 个任务", tasks.iter().filter(|t| matches_filter(t, self.filter) && text(t, "name").to_lowercase().contains(&self.search.to_lowercase())).count()));
             });
             ui.add_space(6.0);
             if tasks.is_empty() {
                 ui.add_space(55.0);
                 ui.vertical_centered(|ui| {
+                    if !self.connected {
+                        if self.starting {
+                            ui.spinner();
+                            ui.heading("正在准备下载引擎");
+                        } else {
+                            ui.heading("下载引擎未能连接");
+                        }
+                        ui.add_space(8.0);
+                        ui.label(&self.message);
+                        ui.weak("任务列表将在引擎连接后加载；当前空白不代表任务已丢失。");
+                        if ui.button(if self.starting { "取消并重新启动" } else { "重试启动" }).clicked() {
+                            self.starting = true;
+                            let _ = self.tx.send(Command::Retry);
+                        }
+                        ui.weak("启动诊断保存在 data/startup.log。");
+                        return;
+                    }
                     ui.heading("从一个下载任务开始");
                     ui.add_space(8.0);
                     ui.weak("添加磁力链接或本机种子文件，实时查看下载进度与连接诊断。");
@@ -820,8 +1140,12 @@ impl eframe::App for DownloadApp {
                     ui.weak("续传已有文件时，将保存目录设为原下载的根目录。");
                 });
             } else {
-                egui::ScrollArea::both()
+                let mut row_rects = Vec::new();
+                let table_hovered = ui.ui_contains_pointer();
+                let table = egui::ScrollArea::both()
                     .id_salt("tasks_scroll")
+                    .auto_shrink([false,false])
+                    .scroll_source(egui::scroll_area::ScrollSource { drag: false, ..Default::default() })
                     .show(ui, |ui| {
                         egui::Grid::new("task_table")
                             .striped(true)
@@ -853,12 +1177,18 @@ impl eframe::App for DownloadApp {
                                         .add_sized(
                                             [310.0, 28.0],
                                             egui::Button::new(text(t, "name"))
-                                                .selected(self.selected == id)
+                                                .selected(self.selection.contains(&id))
                                                 .frame(false)
                                                 .truncate(),
                                         )
                                         .on_hover_text(text(t, "name"));
                                     if response.clicked() || response.secondary_clicked() {
+                                        if response.clicked() && ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+                                            if !self.selection.remove(&id) { self.selection.insert(id.clone()); }
+                                        } else if !response.secondary_clicked() || !self.selection.contains(&id) {
+                                            self.selection.clear();
+                                            self.selection.insert(id.clone());
+                                        }
                                         self.selected = id.clone();
                                         self.state["detail"] = json!({});
                                         let _ = self.tx.send(Command::Select(id.clone()));
@@ -875,6 +1205,11 @@ impl eframe::App for DownloadApp {
                                         }
                                     }
                                     response.context_menu(|ui| {
+                                        if self.selection.len() > 1 {
+                                            ui.label(format!("已选择 {} 个任务",self.selection.len()));
+                                            if ui.button("批量删除所选任务…").clicked() {self.open_remove();ui.close();}
+                                            return;
+                                        }
                                         let media_files=list(&t["media_files"]);
                                         let label=if media_files.len()>1 {"▶ 选择视频 / 音频播放…"} else if text(t,"kind")=="http" && num(t,"progress")<1.0 {"▶ 播放媒体直链"} else if num(t,"progress")<1.0 {"▶ 边下边播"} else {"▶ 播放"};
                                         if ui.add_enabled(!media_files.is_empty(),egui::Button::new(label))
@@ -958,15 +1293,47 @@ impl eframe::App for DownloadApp {
                                     } else {
                                         "—".into()
                                     });
-                                    ui.label(if num(t, "availability") < 0.0 {
+                                    let last_cell = ui.label(if num(t, "availability") < 0.0 {
                                         "—".into()
                                     } else {
                                         format!("{:.2}", num(t, "availability"))
                                     });
+                                    row_rects.push((id, response.rect.union(last_cell.rect)));
                                     ui.end_row();
                                 }
                             });
                     });
+                let (position, pressed, down, released, additive) = ctx.input(|i| (
+                    i.pointer.interact_pos(), i.pointer.primary_pressed(), i.pointer.primary_down(),
+                    i.pointer.primary_released(), i.modifiers.ctrl || i.modifiers.command
+                ));
+                if let Some(position) = position {
+                    if pressed && table_hovered && table.inner_rect.contains(position)
+                        && row_rects.first().is_some_and(|(_,r)| position.y >= r.top())
+                        && !self.remove_open && !self.add_open {
+                        self.selection_anchor = Some(position);
+                        self.selection_base = if additive {self.selection.clone()} else {Default::default()};
+                    }
+                    if let Some(anchor) = self.selection_anchor {
+                        if position.distance(anchor) > 4.0 && (down || released) {
+                            let rect = egui::Rect::from_two_pos(anchor, position).intersect(table.inner_rect);
+                            self.selection = self.selection_base.clone();
+                            for (id,row) in &row_rects {
+                                if row.intersect(table.inner_rect).is_positive() && rect.intersects(*row) { self.selection.insert(id.clone()); }
+                            }
+                            if down {
+                                let painter = ui.painter().with_clip_rect(table.inner_rect);
+                                painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(40,130,240,45));
+                                painter.rect_stroke(rect,0.0,egui::Stroke::new(1.0_f32,Color32::from_rgb(40,130,240)),egui::StrokeKind::Inside);
+                            }
+                        }
+                    }
+                }
+                if released || !down { self.selection_anchor = None; }
+                let painter = ui.painter().with_clip_rect(table.inner_rect);
+                for (id,row) in &row_rects {
+                    if self.selection.contains(id) { painter.rect_filled(*row,2.0,Color32::from_rgba_unmultiplied(40,130,240,25)); }
+                }
             }
         });
         if let Some((id, files)) = self.media_choice.clone() {
@@ -1074,16 +1441,51 @@ impl eframe::App for DownloadApp {
                 .collapsible(false)
                 .show(ctx, |ui| {
                     ui.label("删除任务及其本机任务记录。请选择如何处理下载数据：");
-                    if let Some(task) = tasks.iter().find(|t| text(t, "id") == self.remove_target) {
-                        ui.label(text(task, "name"));
-                        ui.label(format!("目录：{}",text(task,"save_path")));
+                    ui.strong(format!("将移除 {} 个任务", self.remove_targets.len()));
+                    egui::ScrollArea::vertical()
+                        .max_height(180.0)
+                        .show(ui, |ui| {
+                            for task in tasks
+                                .iter()
+                                .filter(|t| self.remove_targets.contains(&text(t, "id")))
+                            {
+                                ui.label(text(task, "name"));
+                            }
+                        });
+                    ui.radio_value(
+                        &mut self.remove_mode,
+                        "keep".into(),
+                        "保留全部下载文件（默认）",
+                    );
+                    ui.radio_value(
+                        &mut self.remove_mode,
+                        "incomplete".into(),
+                        "删除未完成文件 / HTTP 临时文件，保留完整文件",
+                    );
+                    ui.radio_value(
+                        &mut self.remove_mode,
+                        "all".into(),
+                        "删除此任务的全部数据文件（包括已完成文件）",
+                    );
+                    if self.remove_mode != "keep" {
+                        ui.colored_label(
+                            Color32::from_rgb(208, 89, 89),
+                            "文件将永久删除，不经过回收站；同目录其他文件不会删除。",
+                        );
                     }
-                    ui.radio_value(&mut self.remove_mode, "keep".into(), "保留全部下载文件（默认）");
-                    ui.radio_value(&mut self.remove_mode, "incomplete".into(), "删除未完成文件 / HTTP 临时文件，保留完整文件");
-                    ui.radio_value(&mut self.remove_mode, "all".into(), "删除此任务的全部数据文件（包括已完成文件）");
-                    if self.remove_mode != "keep" { ui.colored_label(Color32::from_rgb(208,89,89), "文件将永久删除，不经过回收站；同目录其他文件不会删除。"); }
-                    if ui.button(if self.remove_mode == "keep" {"确认移除，保留文件"} else {"确认移除并删除所选范围的文件"}).clicked() {
-                        let _ = self.tx.send(Command::Post("/api/action",json!({"id":self.remove_target,"action":"remove","delete_mode":self.remove_mode})));
+                    if ui
+                        .button(if self.remove_mode == "keep" {
+                            "确认移除，保留文件"
+                        } else {
+                            "确认移除并删除所选范围的文件"
+                        })
+                        .clicked()
+                    {
+                        let _ = self.tx.send(Command::RemoveMany(
+                            self.remove_targets.clone(),
+                            self.remove_mode.clone(),
+                        ));
+                        self.pending_action = true;
                         self.remove_open = false;
                     }
                 });
@@ -1123,6 +1525,8 @@ impl eframe::App for DownloadApp {
                         "关闭窗口后在系统托盘继续下载",
                     );
                     ui.weak("托盘双击显示窗口；托盘菜单“退出并停止下载”会保存状态并退出。");
+                    ui.checkbox(&mut config.clipboard_watch, "复制磁力链接时弹出新建任务（包括网页中嵌入的磁力地址）");
+                    ui.weak("仅在本机识别，不访问分享网页；确认后才开始下载。Flow 需保持运行或驻留托盘。");
                     ui.horizontal(|ui| {
                         ui.label("下载 KiB/s");
                         ui.add(egui::DragValue::new(&mut config.download_kib).range(0..=4_000_000));
@@ -1198,6 +1602,20 @@ impl eframe::App for DownloadApp {
     }
 }
 
+impl Drop for DownloadApp {
+    fn drop(&mut self) {
+        self.clipboard_stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(worker) = self.clipboard_worker.take() {
+            let _ = worker.join();
+        }
+        let _ = self.tx.send(Command::Shutdown);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn matches_filter(t: &Value, filter: usize) -> bool {
     match filter {
         1 => {
@@ -1205,16 +1623,70 @@ fn matches_filter(t: &Value, filter: usize) -> bool {
                 && !t["paused"].as_bool().unwrap_or(false)
                 && text(t, "error").is_empty()
         }
-        2 => t["paused"].as_bool().unwrap_or(false),
-        3 => num(t, "progress") >= 1.0,
+        2 => {
+            t["paused"].as_bool().unwrap_or(false)
+                && num(t, "progress") < 1.0
+                && text(t, "error").is_empty()
+        }
+        3 => num(t, "progress") >= 1.0 && text(t, "error").is_empty(),
         4 => !text(t, "error").is_empty(),
         _ => true,
     }
 }
 
+#[cfg(test)]
+mod task_filter_tests {
+    use super::*;
+    #[test]
+    fn completed_stopped_tasks_are_not_counted_as_paused() {
+        for (task, expected) in [
+            (json!({"progress":1.0,"paused":true,"error":""}), 3),
+            (json!({"progress":0.4,"paused":true,"error":""}), 2),
+            (json!({"progress":0.4,"paused":false,"error":""}), 1),
+            (json!({"progress":1.0,"paused":true,"error":"failed"}), 4),
+        ] {
+            assert_eq!(
+                (1..=4)
+                    .filter(|f| matches_filter(&task, *f))
+                    .collect::<Vec<_>>(),
+                vec![expected]
+            );
+        }
+    }
+}
+
 fn main() -> eframe::Result {
-    let owned_backend = backend::Backend::start();
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--check-clipboard") {
+        let result = arboard::Clipboard::new().and_then(|mut c| c.get_text());
+        let report = json!({"sequence":open_request::clipboard_sequence(),"readable":result.is_ok(),"magnet_detected":result.as_ref().ok().and_then(|s|open_request::copied_magnet(s)).is_some()});
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                let _ = std::fs::write(
+                    parent.join("clipboard-check.json"),
+                    serde_json::to_vec_pretty(&report).unwrap(),
+                );
+            }
+        }
+        return Ok(());
+    }
+    let external = if args.first().is_some_and(|s| s == "--open") {
+        args.get(1)
+    } else {
+        args.first().filter(|s| !s.starts_with("--"))
+    };
+    let mut open_error = None;
+    if let Some(source) = external {
+        match backend::Backend::root()
+            .map_err(anyhow::Error::msg)
+            .and_then(|root| open_request::enqueue(&root, source))
+        {
+            Ok(()) => {}
+            Err(error) => open_error = Some(error.to_string()),
+        }
+    }
     if std::env::args().any(|a| a == "--check-backend") {
+        let owned_backend = backend::Backend::start();
         let report = match &owned_backend {
             Ok(b) => json!({"ok":true,"root":b.root,"engine":"librqbit 9.0.1","native_rust":true}),
             Err(e) => json!({"ok":false,"error":e}),
@@ -1234,20 +1706,8 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    let (base, token, root, error) = match &owned_backend {
-        Ok(b) => (
-            b.base.clone(),
-            b.token.clone(),
-            b.root.clone(),
-            String::new(),
-        ),
-        Err(e) => (
-            String::new(),
-            String::new(),
-            std::env::current_dir().unwrap_or_default(),
-            e.clone(),
-        ),
-    };
+    let root =
+        backend::Backend::root().unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_icon(
@@ -1261,6 +1721,12 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Flow · 下载工作台",
         options,
-        Box::new(move |cc| Ok(Box::new(DownloadApp::new(cc, base, token, root, error)))),
+        Box::new(move |cc| {
+            let mut app = DownloadApp::new(cc, root);
+            if let Some(message) = open_error {
+                app.message = message;
+            }
+            Ok(Box::new(app))
+        }),
     )
 }

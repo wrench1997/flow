@@ -57,7 +57,8 @@ impl Metric {
             .map(|ms| 1.0 / (1.0 + ms as f64 / 1000.0))
             .unwrap_or(0.0);
         Some(
-            (1000.0 * (0.45 * reliability + 0.4 * seeds.min(1.0) + 0.15 * response)).round() / 10.0,
+            (1000.0 * (0.75 * reliability + 0.05 * seeds.min(1.0) + 0.20 * response)).round()
+                / 10.0,
         )
     }
 }

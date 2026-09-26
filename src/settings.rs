@@ -2,6 +2,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default = "background_default")]
+    pub clipboard_watch: bool,
     #[serde(default)]
     pub seed_after_download: bool,
     #[serde(default = "background_default")]
@@ -14,6 +16,7 @@ pub struct Settings {
 impl Settings {
     pub fn defaults(root: &std::path::Path) -> Self {
         Self {
+            clipboard_watch: true,
             seed_after_download: false,
             background_on_close: true,
             download_dir: root.join("downloads").display().to_string(),

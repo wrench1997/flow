@@ -8,6 +8,29 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
+## What is new in v0.4.0
+
+- Five built-in Tracker subscriptions: XIU2, ngosang, newTrackon, animeTrackerList, and OpenTracker. Existing installations receive the three additions once; disabled/custom sources are preserved. Sources refresh concurrently with a 12-second budget per source, mirror fallback, deduplication and last-good cache retention.
+- Completed tasks are excluded from the Paused category; Paused means an unfinished download that has been stopped.
+
+- Drag with the left mouse button in the task list to select intersecting rows with a translucent blue marquee; Ctrl-drag adds to the selection. Ctrl-click task names to toggle multiple selections. Right-click removal, the toolbar and Delete share a batch confirmation dialog, keep files by default and report per-task failures.
+
+- Magnet metadata resolution reuses cached peers and adds subscribed sources before resolving tracker-less magnets, with two bounded attempts and stage diagnostics. Explicit tracker sets are preserved. Startup resolves at most two pending magnets concurrently.
+- Cache metadata-discovery candidates, replacing them every 30 seconds with peers that actually transferred data, ranked by bytes received; retain up to 64 peers for seven days and exclude private torrents. Diagnostics separate metadata acquisition, no connection attempts, failed connections and connected-but-idle peers without inventing piece-availability information.
+- Tracker scores are labeled health scores, with reported seed counts weighted at only 5%. Per-tracker transfer attribution is unavailable, so these are not download-speed rankings.
+
+- While Flow is running (including in the tray), copying a magnet or a sharing URL containing `magnet:?` opens a confirmation dialog. Clipboard detection is enabled by default and can be disabled in Settings. Existing clipboard contents are ignored at startup. An independent Windows clipboard-change monitor recognizes each new copy, including copying the same link again; no sharing webpage is fetched and no download starts without confirmation.
+
+- Stopped torrents with a complete persisted piece bitmap restore as saved completed tasks without opening their payload files or creating download sessions. File lists and local playback remain available; Verify explicitly reloads the task. Saved completion is not a fresh disk integrity check.
+
+- Peer queries use existing task handles instead of waiting for the session lock during file opening. A separate health check distinguishes failed refreshes from an unresponsive engine. **Exit application** in the main toolbar stops background downloads and exits.
+
+- The window opens before engine initialization and displays the current stage, errors, and a retry button. Closing while disconnected exits instead of hiding to the tray.
+- Flow restores tasks in the background after opening its local API. The derived engine index is backed up before rebuilding; downloaded files and resume bitmaps are retained.
+- Cached torrents with fewer files restore first, before large file collections and unresolved magnets. During restoration, the UI shows known size, the current stage and elapsed time; progress is marked as pending until resume state is available.
+- Initialization can be cancelled, and shutdown bounds the wait for active media streams. Diagnostic stages are saved in `data/startup.log`.
+- Run `register-defaults.ps1` to register this copy of Flow for magnet links and `.torrent` files for the current Windows user. Windows may still require selecting Flow in Default apps.
+
 ## What is new in v0.3.1
 
 - Completed BT tasks stop seeding automatically by default, including existing configurations.
@@ -77,7 +100,7 @@ To reuse another client's files, add the matching torrent and choose the origina
 
 To upgrade, exit Flow through the tray menu, replace `Flow.exe`, and retain `data/` and your download folders.
 
-## Flow Player (v0.3.0)
+## Flow Player
 
 Flow now includes its own playback control panel backed by mpv. Download `setup-player.ps1` from the release assets beside `Flow.exe`, then run `./setup-player.ps1` once to download a pinned, SHA-256-verified Windows build linked from [mpv's installation page](https://mpv.io/installation/). It stays in `runtime/mpv/` beside Flow; no system installation or file association changes are needed.
 
@@ -91,9 +114,9 @@ This is a first playback integration, not an embedded video canvas. Source avail
 
 ## Tracker resilience
 
-Flow preserves existing torrent Trackers and subscribes to public lists from [XIU2](https://github.com/XIU2/TrackersListCollection) and [ngosang](https://github.com/ngosang/trackerslist). These projects publish address lists; individual Tracker servers are independently operated.
+Flow preserves existing torrent Trackers and subscribes to public lists from [XIU2](https://github.com/XIU2/TrackersListCollection) [ngosang](https://github.com/ngosang/trackerslist), [newTrackon](https://newtrackon.com/), [animeTrackerList](https://github.com/DeSireFire/animeTrackerList), and [OpenTracker](https://github.com/1265578519/OpenTracker). These projects publish address lists; individual Tracker servers are independently operated.
 
-In **Tracker → Subscription settings**, add, edit, disable, or remove sources. Each source supports up to five HTTP/HTTPS mirrors, tried in order. If all mirrors fail or return invalid/empty data, Flow retains the last successful cache.
+In **Tracker → Subscription settings**, add, edit, disable, or remove sources. Each source supports up to five HTTP/HTTPS mirrors, tried in order within a 12-second refresh budget. Enabled sources refresh concurrently (at most 16), and duplicate Tracker addresses are merged. The v0.4.0 upgrade adds missing new sources once; removing them afterward is respected on restart. If all mirrors fail or return invalid/empty data, Flow retains the last successful cache.
 
 - Default list refresh: **24 hours**; health checks for unpaused tasks: **30 minutes**, both configurable.
 - Failed queries use exponential retry backoff, capped at **6 hours**.
