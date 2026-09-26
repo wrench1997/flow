@@ -21,6 +21,9 @@ pub struct Player {
     seek: f64,
     history: std::collections::BTreeMap<String, f64>,
     current_key: String,
+    setup: Option<mpsc::Receiver<crate::player_setup::Event>>,
+    setup_status: String,
+    pending_play: Option<(String, String, Option<String>)>,
 }
 
 impl Player {
@@ -32,6 +35,9 @@ impl Player {
         Self {
             history,
             current_key: String::new(),
+            setup: None,
+            setup_status: String::new(),
+            pending_play: None,
             open: false,
             source: String::new(),
             root,
@@ -51,10 +57,7 @@ impl Player {
             }
         }
         let exe = self.root.join("runtime/mpv/mpv.exe");
-        anyhow::ensure!(
-            exe.is_file(),
-            "缺少播放内核，请先运行 setup-player.ps1（只需一次）"
-        );
+        anyhow::ensure!(exe.is_file(), "缺少播放内核，请点击安装播放器");
         let pipe = format!(r"\\.\pipe\flow-player-{}", uuid::Uuid::new_v4().simple());
         let mut command = Command::new(exe);
         command
@@ -160,6 +163,12 @@ impl Player {
         }
     }
     pub fn play(&mut self, source: String, title: String, token: Option<&str>) {
+        if !self.root.join("runtime/mpv/mpv.exe").is_file() {
+            self.pending_play = Some((source, title, token.map(str::to_owned)));
+            self.open = true;
+            self.begin_setup();
+            return;
+        }
         self.remember();
         self.open = false;
         self.message.clear();
@@ -205,7 +214,52 @@ impl Player {
                     .into();
         }
     }
+    fn begin_setup(&mut self) {
+        if self.setup.is_none() {
+            self.message.clear();
+            self.setup_status = "正在准备播放内核…".into();
+            self.setup = Some(crate::player_setup::start(self.root.clone()));
+        }
+    }
     pub fn ui(&mut self, ctx: &egui::Context) {
+        if self.setup.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+            let mut finished = None;
+            if let Some(rx) = &self.setup {
+                loop {
+                    match rx.try_recv() {
+                        Ok(crate::player_setup::Event::Progress(status)) => {
+                            self.setup_status = status
+                        }
+                        Ok(crate::player_setup::Event::Finished(result)) => {
+                            finished = Some(result);
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            finished = Some(Err("播放器安装中断，请重试".into()));
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(result) = finished {
+                self.setup = None;
+                self.setup_status.clear();
+                match result {
+                    Ok(()) => {
+                        self.message.clear();
+                        if let Some((source, title, token)) = self.pending_play.take() {
+                            self.play(source, title, token.as_deref());
+                        }
+                    }
+                    Err(error) => {
+                        self.message = error;
+                        self.open = true;
+                    }
+                }
+            }
+        }
         while let Ok(event) = self.events.try_recv() {
             if event["event"] == "property-change" {
                 if let Some(name) = event["name"].as_str() {
@@ -258,6 +312,14 @@ impl Player {
                 if ui.button("播放").clicked() { self.open_source(); }
             });
             ui.separator();
+            if self.setup.is_some() {
+                ui.horizontal(|ui| { ui.spinner(); ui.label(&self.setup_status); });
+                ui.weak("首次播放会自动下载并校验 mpv，完成后继续播放；不需要运行脚本。");
+                if self.pending_play.is_some() && ui.button("安装完成后不自动播放").clicked() { self.pending_play = None; }
+            } else if !self.root.join("runtime/mpv/mpv.exe").is_file() {
+                ui.label("播放器尚未安装。首次播放也会自动配置。");
+                if ui.button("安装 / 重试安装播放器").clicked() { self.begin_setup(); }
+            }
             ui.label(egui::RichText::new(&self.title).strong());
             let buffering=self.props["paused-for-cache"]==true;
             ui.label(if buffering {"正在缓冲 · 等待播放所需数据"} else if self.props["eof-reached"]==true {"播放结束"} else if self.props["pause"]==true {"已暂停播放"} else if self.child.is_some() {"播放内核已连接"} else {"打开媒体开始播放"});
@@ -274,7 +336,7 @@ impl Player {
             ui.horizontal(|ui| {
                 if ui.button("−10 秒").clicked() {self.command(json!(["seek",-10,"relative"]));}
                 if ui.button(if self.props["pause"]==true {"▶ 继续"} else {"Ⅱ 暂停"}).clicked() {self.command(json!(["cycle","pause"]));}
-                if ui.button("停止").clicked() {self.command(json!(["stop"]));self.props=json!({});}
+                if ui.button("停止").clicked() {self.pending_play=None;self.command(json!(["stop"]));self.props=json!({});}
                 if ui.button("+10 秒").clicked() {self.command(json!(["seek",10,"relative"]));}
                 if ui.button("全屏").clicked() {self.command(json!(["cycle","fullscreen"]));}
             });
@@ -330,7 +392,7 @@ impl Drop for Player {
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "requires the optional runtime installed by setup-player.ps1"]
+    #[ignore = "requires the optional mpv runtime"]
     fn real_mpv_decodes_seeks_and_pauses_generated_audio() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("fixture.wav");

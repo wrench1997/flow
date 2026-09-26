@@ -8,6 +8,10 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
+## What is new in v0.4.1
+
+- First playback automatically downloads, verifies and installs the pinned mpv runtime. Download progress and retry are built into Flow; playback resumes after setup. No manual PowerShell script is needed. Existing installations are reused.
+
 ## What is new in v0.4.0
 
 - Five built-in Tracker subscriptions: XIU2, ngosang, newTrackon, animeTrackerList, and OpenTracker. Existing installations receive the three additions once; disabled/custom sources are preserved. Sources refresh concurrently with a 12-second budget per source, mirror fallback, deduplication and last-good cache retention.
@@ -102,7 +106,7 @@ To upgrade, exit Flow through the tray menu, replace `Flow.exe`, and retain `dat
 
 ## Flow Player
 
-Flow now includes its own playback control panel backed by mpv. Download `setup-player.ps1` from the release assets beside `Flow.exe`, then run `./setup-player.ps1` once to download a pinned, SHA-256-verified Windows build linked from [mpv's installation page](https://mpv.io/installation/). It stays in `runtime/mpv/` beside Flow; no system installation or file association changes are needed.
+Flow includes its own playback controls backed by mpv. On first playback, Flow downloads a pinned Windows build linked from [mpv’s installation page](https://mpv.io/installation/), verifies SHA-256, extracts it using the Windows 10/11 archive utility, and continues playback. Progress and retry are available inside the app. No script or separate installation is required. The runtime stays in `runtime/mpv/` beside Flow; existing installations are reused, and system file associations are unchanged. First setup requires an internet connection and write access beside the executable. `setup-player.ps1` remains an optional manual alternative.
 
 - Open **Player** in the toolbar for local video/audio or HTTP(S) media URLs.
 - For torrents/magnets, right-click a task and choose **Play / Play while downloading**. A single media file plays directly; multiple media files open a picker sorted by size. MP4, MKV and other common media extensions are recognized automatically after metadata loads. The **Files** tab also has individual Play buttons. This selects that file if needed and resumes the task.

@@ -7,6 +7,7 @@ mod http_download;
 mod media;
 mod open_request;
 mod player;
+mod player_setup;
 mod settings;
 mod subscriptions;
 mod trackers;
