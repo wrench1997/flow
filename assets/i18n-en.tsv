@@ -415,3 +415,4 @@ HTTP WebSeed 请求失败，正在退避等待重试；当前没有在线 BT 节
 文件正在校验，请校验完成后播放|Files are being checked; wait before playback
 语言设置保存失败：{}|Cannot save language preference: {}
 语言已切换，下载不受影响。|Language changed; downloads continue unaffected.
+已找到旧版 Flow，将在此目录覆盖升级，保留配置和下载文件。|Previous Flow installation found. Upgrade in this folder while keeping settings and downloads.

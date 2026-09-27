@@ -6,6 +6,25 @@ use std::{
     sync::mpsc,
 };
 const UNINSTALL_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Flow";
+fn valid_install_directory(path: PathBuf) -> Option<PathBuf> {
+    (path.is_absolute() && path.parent().is_some() && path.join("Flow.exe").is_file())
+        .then_some(path)
+}
+fn previous_install_directory() -> Option<PathBuf> {
+    // Read the registry through .NET to preserve Unicode paths without parsing reg.exe output.
+    let exe = PathBuf::from(std::env::var_os("SystemRoot")?)
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let mut cmd = Command::new(exe);
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command",
+        "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding; $k=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Flow'); if($k){try{$p=$k.GetValue('InstallLocation'); if($p){[Console]::Write($p)}}finally{$k.Dispose()}}"]);
+    hidden(&mut cmd);
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    valid_install_directory(PathBuf::from(value.trim_start_matches('\u{feff}')))
+}
 fn hidden(cmd: &mut Command) {
     #[cfg(windows)]
     {
@@ -353,8 +372,10 @@ pub fn run(args: Vec<String>) -> eframe::Result {
             .unwrap()
             .to_path_buf()
     } else {
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_else(|| "C:\\Flow".into()))
-            .join("Programs/Flow")
+        previous_install_directory().unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_else(|| "C:\\Flow".into()))
+                .join("Programs/Flow")
+        })
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -385,7 +406,11 @@ pub fn run(args: Vec<String>) -> eframe::Result {
                 directory: directory.display().to_string(),
                 desktop: true,
                 uninstall,
-                status: String::new(),
+                status: if !uninstall && directory.join("Flow.exe").is_file() {
+                    "已找到旧版 Flow，将在此目录覆盖升级，保留配置和下载文件。".into()
+                } else {
+                    String::new()
+                },
                 rx: None,
                 done: false,
             }))
@@ -394,6 +419,16 @@ pub fn run(args: Vec<String>) -> eframe::Result {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn discovery_rejects_stale_and_relative_install_locations() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("中文 Flow & space");
+        std::fs::create_dir(&path).unwrap();
+        assert!(super::valid_install_directory(path.clone()).is_none());
+        std::fs::write(path.join("Flow.exe"), b"old version").unwrap();
+        assert_eq!(super::valid_install_directory(path.clone()), Some(path));
+        assert!(super::valid_install_directory("relative".into()).is_none());
+    }
     #[test]
     #[cfg(windows)]
     fn canonical_paths_create_and_remove_real_shortcuts() {
