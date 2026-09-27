@@ -1300,7 +1300,17 @@ impl Engine {
             );
             files.push(json!({"index":0,"path":name,"size":total,"done":total,"selected":true,"source":output.join(name).display().to_string()}));
         }
-        Ok(json!({"total":total,"files":files}))
+        // Stopped completed torrents have no live handle to supply a title.
+        // Read the cached metainfo rather than falling back to a magnet's dn.
+        let name = info
+            .get(b"name.utf-8".as_slice())
+            .or_else(|| info.get(b"name".as_slice()))
+            .and_then(|value| match value {
+                B::Bytes(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+                _ => None,
+            })
+            .filter(|name| !name.trim().is_empty());
+        Ok(json!({"name":name,"total":total,"files":files}))
     }
 
     async fn recover_disconnected(&self) {
@@ -1522,6 +1532,9 @@ impl Engine {
                     })
             );
             if let Some(cached) = self.completed_cache.lock().unwrap().get(&e.id) {
+                if let Some(name) = cached["name"].as_str() {
+                    item["name"] = json!(name);
+                }
                 if selected == e.id {
                     detail["files"] = cached["files"].clone();
                 }
@@ -2199,7 +2212,7 @@ mod tests {
         std::fs::create_dir_all(bitmap.parent().unwrap()).unwrap();
         let entry = Entry {
             id: "fixture".into(),
-            source: "fixture.torrent".into(),
+            source: format!("magnet:?xt=urn:btih:{}", parsed.info_hash.as_string()),
             paused: true,
             save_path: temp.path().join("downloads").display().to_string(),
             ..Default::default()
@@ -2211,12 +2224,44 @@ mod tests {
         engine.restore().await;
         assert!(engine.handle("fixture").is_err());
         let state = engine.snapshot("fixture");
+        assert_eq!(state["tasks"][0]["name"], "x");
         assert_eq!(state["tasks"][0]["progress"], 1.0);
         assert_eq!(state["detail"]["files"][0]["path"], "x");
         assert!(!temp.path().join("downloads/x").exists());
         engine.action("fixture", "pause", "").await.unwrap();
         engine.action("fixture", "resume", "").await.unwrap();
         assert!(engine.handle("fixture").is_err());
+        // Multi-file collections need their torrent title, not a child filename
+        // or the placeholder from a bare magnet. UTF-8 names take precedence.
+        use serde_bencode::value::Value as B;
+        let title = "Arcane.S02.COMPLETE.REPACK.1080p.NF.WEB-DL.DDP5.1.Atmos.H.264-FLUX[TGx]";
+        let info = B::Dict([
+            (b"name".to_vec(), B::Bytes(b"legacy-title".to_vec())),
+            (b"name.utf-8".to_vec(), B::Bytes(title.as_bytes().to_vec())),
+            (b"piece length".to_vec(), B::Int(16384)),
+            (b"pieces".to_vec(), B::Bytes(vec![0; 20])),
+            (b"files".to_vec(), B::List(vec![B::Dict([
+                (b"length".to_vec(), B::Int(1)),
+                (b"path".to_vec(), B::List(vec![B::Bytes(b"episode.mkv".to_vec())])),
+            ].into_iter().collect())])),
+        ].into_iter().collect());
+        let bytes = serde_bencode::to_bytes(&B::Dict([(b"info".to_vec(), info)].into_iter().collect())).unwrap();
+        let parsed = librqbit::torrent_from_bytes(&bytes).unwrap();
+        std::fs::write(engine.data.join("collection.torrent"), &bytes).unwrap();
+        std::fs::write(engine.data.join("rqbit").join(format!("{:?}.bitv", parsed.info_hash)), [0x80]).unwrap();
+        engine.entries.lock().unwrap().push(Entry {
+            id: "collection".into(),
+            source: format!("magnet:?xt=urn:btih:{}&dn=wrong-title", parsed.info_hash.as_string()),
+            paused: true,
+            save_path: temp.path().join("downloads").display().to_string(),
+            ..Default::default()
+        });
+        engine.restore().await;
+        let state = engine.snapshot("collection");
+        let collection = state["tasks"].as_array().unwrap().iter().find(|task| task["id"] == "collection").unwrap();
+        assert_eq!(collection["name"], title);
+        assert_eq!(collection["state"], "complete");
+        assert!(engine.handle("collection").is_err());
         engine.session.stop().await;
     }
     #[test]

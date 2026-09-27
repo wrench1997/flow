@@ -8,12 +8,12 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
-## v0.4.5 installer fix
+## Installation behavior
 
 - Fix Windows canonical path handling when creating shortcuts, including Chinese names and spaces.
 - Use the selected installation folder directly without appending another Flow folder. Retry in the same directory while retaining user data.
 
-## What is new in v0.4.4
+## Packaging and updates
 
 - Windows installer: choose a per-user installation directory, create shortcuts and register an uninstall entry. Uninstall retains downloads, runtime and personal data.
 - Portable ZIP: extract the folder and run `Flow.exe`, with no installation required.
@@ -24,21 +24,21 @@ One executable starts both the desktop interface and embedded download engine. N
 
 | File | Use |
 | --- | --- |
-| `Flow-Setup-0.4.5-x64.exe` | Installer with directory selection, shortcuts and uninstall entry |
-| `Flow-0.4.5-windows-x64-portable.zip` | Extract and run; keep the extracted folder writable |
+| `Flow-Setup-<release>-x64.exe` | Installer with directory selection, shortcuts and uninstall entry |
+| `Flow-<release>-windows-x64-portable.zip` | Extract and run; keep the extracted folder writable |
 | `Flow.exe` | Replace an existing copy after fully exiting Flow |
 
 Use **Update** in the toolbar or **Settings → Software update / Mirror**. By default, Flow checks once each launch; downloads and installation require confirmation. Updates use the same in-place executable replacement for installed and portable copies. Existing downloads, `data/` and `runtime/` remain in place. Backups are saved under `data/updates/`.
 
 Mirror setting: enter an HTTPS prefix provided by your proxy service. The client requests `PREFIX/https://github.com/…`; the service must support GitHub Releases assets and redirects. A configured mirror is tried first, then official GitHub on failure. Leave it blank for direct GitHub access. No public mirror is bundled or guaranteed available. Signature verification cannot be disabled; a forged manifest, a modified executable or a downgrade is rejected. The app currently targets Windows x64.
 
-Versions before v0.4.4 need one manual upgrade to obtain the updater. Installation does not automatically migrate data from a separate portable folder: exit Flow and copy `data/` and optional `runtime/` to the chosen installation directory if retaining that setup. Download paths remain unchanged; keep the original download folders.
+Copies without the built-in updater need a manual upgrade first. Installation does not automatically migrate data from a separate portable folder: exit Flow and copy `data/` and optional `runtime/` to the chosen installation directory if retaining that setup. Download paths remain unchanged; keep the original download folders.
 
-## What is new in v0.4.3
+## Source recovery
 
 - After two minutes without connections or download progress, restart the existing task’s discovery stream, with a ten-minute cooldown. Paused/completed tasks and tasks with live peers are left alone; verified pieces are preserved. Discovery uses the task’s existing Trackers and DHT where allowed, not a scrape-only query. Formerly useful disconnected peers remain cached and are labeled as past contributors. Recovery attempts are recorded in the diagnostic log; discovering a usable alternative is not guaranteed.
 
-## What is new in v0.4.2
+## Peer management and torrent import
 
 - Peer records and manual IP blacklist management persist locally. Reference scores use observed sustained/intermittent/idle transfer (90/60/10); new peers remain unscored. Blocking and unblocking require restarting Flow to update the native incoming/outgoing connection filter. Shared IPs affect all BT tasks; there is no automatic malicious-client classification. Records include the latest observed task, client, cumulative session transfers, errors and policy reason.
 
@@ -50,11 +50,11 @@ Versions before v0.4.4 need one manual upgrade to obtain the updater. Installati
 - Settings includes a `.torrent` association button. Double-clicking opens the same import dialog, including when Flow is already running. If Windows has an explicit default, select Flow in Open with → Always.
 - Magnets can be added paused, then configured in the Files tab once metadata arrives. Shared pieces can write some data to adjacent unselected files.
 
-## What is new in v0.4.1
+## Player setup
 
 - First playback automatically downloads, verifies and installs the pinned mpv runtime. Download progress and retry are built into Flow; playback resumes after setup. No manual PowerShell script is needed. Existing installations are reused.
 
-## What is new in v0.4.0
+## Task management and engine startup
 
 - Five built-in Tracker subscriptions: XIU2, ngosang, newTrackon, animeTrackerList, and OpenTracker. Existing installations receive the three additions once; disabled/custom sources are preserved. Sources refresh concurrently with a 12-second budget per source, mirror fallback, deduplication and last-good cache retention.
 - Completed tasks are excluded from the Paused category; Paused means an unfinished download that has been stopped.
@@ -63,11 +63,11 @@ Versions before v0.4.4 need one manual upgrade to obtain the updater. Installati
 
 - Magnet metadata resolution reuses cached peers and adds subscribed sources before resolving tracker-less magnets, with two bounded attempts and stage diagnostics. Explicit tracker sets are preserved. Startup resolves at most two pending magnets concurrently.
 - Cache metadata-discovery candidates, replacing them every 30 seconds with peers that actually transferred data, ranked by bytes received; retain up to 64 peers for seven days and exclude private torrents. Diagnostics separate metadata acquisition, no connection attempts, failed connections and connected-but-idle peers without inventing piece-availability information.
-- Tracker scores are labeled health scores, with reported seed counts weighted at only 5%. Per-tracker transfer attribution is unavailable, so these are not download-speed rankings.
+- Tracker rows show response history, latency and reported peers. The UI does not present a composite score as evidence of download speed; actual received bytes are shown in peer diagnostics.
 
 - While Flow is running (including in the tray), copying a magnet or a sharing URL containing `magnet:?` opens a confirmation dialog. Clipboard detection is enabled by default and can be disabled in Settings. Existing clipboard contents are ignored at startup. An independent Windows clipboard-change monitor recognizes each new copy, including copying the same link again; no sharing webpage is fetched and no download starts without confirmation.
 
-- Stopped torrents with a complete persisted piece bitmap restore as saved completed tasks without opening their payload files or creating download sessions. File lists and local playback remain available; Verify explicitly reloads the task. Saved completion is not a fresh disk integrity check.
+- Stopped torrents with a complete persisted piece bitmap restore as saved completed tasks without opening their payload files or creating download sessions. File lists and local playback remain available; Verify explicitly reloads the task. Saved completion is not a fresh disk integrity check. Completed task names are restored from cached torrent metadata, including magnets without a display-name parameter.
 
 - Peer queries use existing task handles instead of waiting for the session lock during file opening. A separate health check distinguishes failed refreshes from an unresponsive engine. **Exit application** in the main toolbar stops background downloads and exits.
 
@@ -77,13 +77,13 @@ Versions before v0.4.4 need one manual upgrade to obtain the updater. Installati
 - Initialization can be cancelled, and shutdown bounds the wait for active media streams. Diagnostic stages are saved in `data/startup.log`.
 - Run `register-defaults.ps1` to register this copy of Flow for magnet links and `.torrent` files for the current Windows user. Windows may still require selecting Flow in Default apps.
 
-## What is new in v0.3.1
+## Completion and seeding
 
 - Completed BT tasks stop seeding automatically by default, including existing configurations.
 - Opt in with **Continue seeding after download** in Settings; turning it off also stops completed tasks that are currently seeding.
 - Completed, stopped tasks show **Completed**. Downloading tasks can still upload available pieces.
 
-## What is new in v0.3.0
+## Playback controls
 
 - Right-click media tasks to play or stream while downloading; automatically detect common video/audio file types.
 - A single video window with mouse controls; open the additional Flow control panel only when needed.
@@ -103,7 +103,7 @@ Versions before v0.4.4 need one manual upgrade to obtain the updater. Installati
 - Double-click a task name or press **Space** to pause/resume. **Delete** opens a removal confirmation.
 - Persistent default directory, global speed limits, and connection limit settings.
 - Editable Tracker subscriptions, ordered mirrors, local caching, retry backoff, and periodic health checks.
-- Resource-specific Tracker statistics and scoring, DHT discovery with persisted routing state, and engine session persistence.
+- Resource-specific Tracker statistics, DHT discovery with persisted routing state, and engine session persistence.
 - Light/dark appearance and an embedded multi-resolution application icon.
 
 ## Build and run
@@ -156,23 +156,23 @@ Flow includes its own playback controls backed by mpv. On first playback, Flow d
 - Torrent playback uses authenticated loopback HTTP with byte-range seeking and librqbit's stream-aware piece scheduling. It waits for missing pieces rather than reading unwritten file bytes.
 - Closing the control panel leaves playback running; closing the video window stops playback. Stopping playback does not pause downloads. Fully exiting Flow stops both.
 
-This is a first playback integration, not an embedded video canvas. Source availability and download speed determine buffering; dragging to missing data can take time. No DRM, sharing-page extraction, disc menus, or playlist manager is provided. Copy `runtime/mpv/` together with the executable when moving a player-enabled installation. The player is included starting with v0.3.0.
+This is a first playback integration, not an embedded video canvas. Source availability and download speed determine buffering; dragging to missing data can take time. No DRM, sharing-page extraction, disc menus, or playlist manager is provided. Copy `runtime/mpv/` together with the executable when moving a player-enabled installation.
 
 ## Tracker resilience
 
 Flow preserves existing torrent Trackers and subscribes to public lists from [XIU2](https://github.com/XIU2/TrackersListCollection) [ngosang](https://github.com/ngosang/trackerslist), [newTrackon](https://newtrackon.com/), [animeTrackerList](https://github.com/DeSireFire/animeTrackerList), and [OpenTracker](https://github.com/1265578519/OpenTracker). These projects publish address lists; individual Tracker servers are independently operated.
 
-In **Tracker → Subscription settings**, add, edit, disable, or remove sources. Each source supports up to five HTTP/HTTPS mirrors, tried in order within a 12-second refresh budget. Enabled sources refresh concurrently (at most 16), and duplicate Tracker addresses are merged. The v0.4.0 upgrade adds missing new sources once; removing them afterward is respected on restart. If all mirrors fail or return invalid/empty data, Flow retains the last successful cache.
+In **Tracker → Subscription settings**, add, edit, disable, or remove sources. Each source supports up to five HTTP/HTTPS mirrors, tried in order within a 12-second refresh budget. Enabled sources refresh concurrently (at most 16), and duplicate Tracker addresses are merged. Missing built-in sources are added once during subscription migration; later removals are respected on restart. If all mirrors fail or return invalid/empty data, Flow retains the last successful cache.
 
 - Default list refresh: **24 hours**; health checks for unpaused tasks: **30 minutes**, both configurable.
 - Failed queries use exponential retry backoff, capped at **6 hours**.
 - Up to **200 Trackers per task**, **12 concurrent queries** across tasks, and an **8-second** request timeout.
-- HTTP/UDP scrape queries use the current resource hash; scores combine query history, reported seed count, and response time.
+- HTTP/UDP scrape queries use the current resource hash and show reported seed counts, response history and latency.
 - Private torrents are excluded from public Tracker discovery.
 
-**Background checks update candidates and scores without restarting downloads.** New candidates require **Apply candidates**, which currently reloads the task and verifies existing files.
+**Background checks update candidates and query records without restarting downloads.** New candidates require **Apply candidates**, which currently reloads the task and verifies existing files.
 
-A scrape failure does not prove a Tracker cannot return peers. Reported seed counts are not connected peers, and higher scores do not guarantee faster downloads. DHT offers another discovery path for public torrents, but cannot recover missing content without reachable peers holding it.
+A scrape failure does not prove a Tracker cannot return peers. Reported seed counts are not connected peers, and a successful response does not guarantee a usable download source. DHT offers another discovery path for public torrents, but cannot recover missing content without reachable peers holding it.
 
 ## Local data and portability
 
