@@ -89,6 +89,7 @@ pub struct Catalog {
     pub config: Mutex<Config>,
     cache: Mutex<BTreeMap<String, Cache>>,
     gate: tokio::sync::Mutex<()>,
+    refresh: Mutex<serde_json::Value>,
 }
 fn write(path: &Path, value: &impl Serialize) -> Result<()> {
     let temp = path.with_extension("tmp");
@@ -134,23 +135,27 @@ impl Catalog {
             config: Mutex::new(config),
             cache: Mutex::new(cache),
             gate: tokio::sync::Mutex::new(()),
+            refresh: Mutex::new(serde_json::json!({})),
         })
     }
     pub async fn save(&self, config: Config) -> Result<()> {
         config.validate()?;
-        let _gate = self.gate.lock().await;
+        // Saving must not wait for the network refresh budget. A queued refresh
+        // reads the latest config once it acquires the refresh gate.
+        let mut current = self.config.lock().unwrap();
         write(&self.path.join("tracker-sources.json"), &config)?;
-        *self.config.lock().unwrap() = config;
+        *current = config;
         Ok(())
     }
     pub fn snapshot(&self) -> serde_json::Value {
-        serde_json::json!({"config":*self.config.lock().unwrap(), "cache":*self.cache.lock().unwrap()})
+        serde_json::json!({"config":*self.config.lock().unwrap(), "cache":*self.cache.lock().unwrap(), "refresh":*self.refresh.lock().unwrap()})
     }
     pub async fn candidates(
         &self,
         client: &reqwest::Client,
     ) -> (BTreeMap<String, String>, Vec<String>) {
         let _gate = self.gate.lock().await;
+        *self.refresh.lock().unwrap() = serde_json::json!({"running":true,"started":now()});
         let config = self.config.lock().unwrap().clone();
         let mut all = BTreeMap::new();
         let mut notes = Vec::new();
@@ -195,6 +200,7 @@ impl Catalog {
         ) {
             notes.push(format!("缓存保存失败：{e}"));
         }
+        *self.refresh.lock().unwrap() = serde_json::json!({"running":false,"finished":now(),"count":all.len(),"notes":notes});
         (all, notes)
     }
 }
@@ -316,6 +322,18 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     #[tokio::test]
+    async fn saving_does_not_wait_for_subscription_network_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = Catalog::open(dir.path()).unwrap();
+        let _refresh = catalog.gate.lock().await;
+        let mut config = Config::default();
+        config.refresh_hours = 12;
+        tokio::time::timeout(std::time::Duration::from_millis(200), catalog.save(config))
+            .await.unwrap().unwrap();
+        assert_eq!(catalog.snapshot()["config"]["refresh_hours"], 12);
+    }
+
+    #[tokio::test]
     async fn sources_refresh_concurrently_and_deduplicate() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/list", listener.local_addr().unwrap());
@@ -358,6 +376,11 @@ mod tests {
         .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found.values().next().unwrap(), "A");
+        let status = catalog.snapshot()["refresh"].clone();
+        assert_eq!(status["running"], false);
+        assert_eq!(status["count"], 1);
+        assert!(status["finished"].as_u64().unwrap() > 0);
+        assert!(!status["notes"].as_array().unwrap().is_empty());
         server.abort();
     }
     #[tokio::test]

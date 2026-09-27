@@ -419,3 +419,13 @@ HTTP WebSeed 请求失败，正在退避等待重试；当前没有在线 BT 节
 显示主界面|Show main window
 停止下载并退出|Stop downloads and exit
 自动|Auto
+正在加载 Tracker 候选…|Loading Tracker candidates…
+Tracker 候选已加载|Tracker candidates loaded
+个候选；缓存与刷新详情|candidates; cache and refresh details
+引擎配置|Engine configuration
+已载入引擎|Loaded into engine
+待应用候选 / 任务未载入|Candidate not applied / task not loaded
+Tracker 用于发现节点；文件数据来自对等连接。已载入不代表已连接，当前引擎未提供逐 Tracker 的节点来源归属。|Trackers discover peers; peers deliver files. Loaded does not mean connected. The engine does not report per-Tracker peer attribution.
+Tracker 订阅已保存，正在加载候选；不会自动重载下载任务。|Tracker subscriptions saved. Loading candidates without reloading downloads.
+Tracker 候选已提交引擎，正在重新载入和校验；连接状态请查看任务。|Tracker candidates submitted. Reloading and checking files; see the task for connection status.
+Tracker 查询已开始，结果将在 Tracker 页面更新。|Tracker query started. Results will appear on the Tracker page.

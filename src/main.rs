@@ -41,7 +41,7 @@ enum Event {
     State(Value),
     RefreshFailed(bool, String),
     Error(String),
-    Done,
+    Done(String),
     Play(String, String, String),
     PlayError(String),
     Open(String),
@@ -439,7 +439,7 @@ impl DownloadApp {
                                 .and_then(|r| r.json::<Value>());
                             match result {
                                 Ok(v) if v.get("error").is_none() => {
-                                    let _ = events.send(Event::Done);
+                                    let _ = events.send(Event::Done(v["message"].as_str().unwrap_or("操作成功").to_owned()));
                                 }
                                 Ok(v) => {
                                     let _ = events.send(Event::Error(text(&v, "error")));
@@ -716,6 +716,15 @@ impl DownloadApp {
                         serde_json::from_value(self.state["subscriptions"]["config"].clone()).ok();
                 }
                 ui.weak(crate::i18n::t("Tracker 订阅设置"));
+                let refresh = &self.state["subscriptions"]["refresh"];
+                if refresh["running"] == true { ui.spinner(); ui.label(crate::i18n::t("正在加载 Tracker 候选…")); }
+                else if refresh["finished"].is_number() {
+                    ui.colored_label(Color32::from_rgb(20, 150, 130), crate::i18n::t("Tracker 候选已加载"));
+                    ui.label(refresh["count"].to_string());
+                    ui.label(crate::i18n::t("个候选；缓存与刷新详情"))
+                        .on_hover_text(list(&refresh["notes"]).iter().filter_map(Value::as_str).map(crate::i18n::t).collect::<Vec<_>>().join("\n"));
+                }
+
             });
         }
         egui::ScrollArea::both().auto_shrink([false,false]).id_salt("details_scroll").show(ui, |ui| {
@@ -823,11 +832,13 @@ impl DownloadApp {
                             if ui.button(crate::i18n::t("应用候选（重新校验）")).clicked() {self.action("apply_trackers");}
                         });
                         ui.label(crate::i18n::t(text(&self.state["detail"]["discovery"], "message")));
+                        ui.weak(crate::i18n::t("Tracker 用于发现节点；文件数据来自对等连接。已载入不代表已连接，当前引擎未提供逐 Tracker 的节点来源归属。"));
                         ui.weak(crate::i18n::t("这里只展示 Tracker 查询结果，不能证明有人给你上传。实际收数与持续性请看“对等连接”；不同 Tracker 报告人数不可相加。"));
-                        egui::Grid::new("trackers").striped(true).num_columns(7).show(ui, |ui| {
-                            for title in ["Tracker 地址", "服务器报告做种数", "查询耗时", "查询成功 / 失败", "列表来源", "查询状态", "响应 / 错误原因"] {ui.strong(crate::i18n::t(title));} ui.end_row();
+                        egui::Grid::new("trackers").striped(true).num_columns(8).show(ui, |ui| {
+                            for title in ["Tracker 地址", "引擎配置", "服务器报告做种数", "查询耗时", "查询成功 / 失败", "列表来源", "查询状态", "响应 / 错误原因"] {ui.strong(crate::i18n::t(title));} ui.end_row();
                             for t in list(&self.state["detail"]["trackers"]) {
                                 ui.label(text(&t,"url"));
+                                ui.label(crate::i18n::t(if t["loaded"] == true {"已载入引擎"} else {"待应用候选 / 任务未载入"}));
                                 ui.label(crate::i18n::t(if t["seeders"].is_number() {format!("{:.0}",num(&t,"seeders"))} else {"—".into()}));
                                 ui.label(crate::i18n::t(if t["latency_ms"].is_number() {format!("{:.0} ms",num(&t,"latency_ms"))} else {"—".into()}));
                                 ui.label(crate::i18n::t(format!("{:.0} / {:.0}",num(&t,"successes"),num(&t,"failures"))));
@@ -994,9 +1005,9 @@ impl eframe::App for DownloadApp {
                     self.connected = alive;
                     self.message = message;
                 }
-                Event::Done => {
+                Event::Done(message) => {
                     self.pending_action = false;
-                    self.message = "操作成功".into();
+                    self.message = message;
                 }
             }
         }

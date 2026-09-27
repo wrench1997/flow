@@ -1917,6 +1917,7 @@ impl Engine {
                         let metric = e.metrics.get(url).cloned().unwrap_or_default();
                         let mut row = serde_json::to_value(&metric).unwrap();
                         row["url"] = json!(url);
+                        row["loaded"] = json!(handles.get(&e.id).is_some_and(|h| h.shared().trackers.iter().any(|t| t.as_str() == url)));
 
                         row
                     })
@@ -2051,7 +2052,11 @@ async fn action(State(s): State<ApiState>, Json(v): Json<Value>) -> Response {
                 },
             )
             .await
-            .map(|_| json!({"ok":true})),
+            .map(|_| json!({"ok":true,"message":match v["action"].as_str().unwrap_or("") {
+                "apply_trackers" => "Tracker 候选已提交引擎，正在重新载入和校验；连接状态请查看任务。",
+                "discover" | "announce" => "Tracker 查询已开始，结果将在 Tracker 页面更新。",
+                _ => "操作成功",
+            }})),
     )
 }
 
@@ -2140,13 +2145,16 @@ async fn subscriptions(
     State(s): State<ApiState>,
     Json(config): Json<crate::subscriptions::Config>,
 ) -> Response {
-    reply(
-        s.engine
-            .subscriptions
-            .save(config)
-            .await
-            .map(|_| json!({"ok":true})),
-    )
+    if let Err(error) = s.engine.subscriptions.save(config).await {
+        return reply(Err(error));
+    }
+    let engine = s.engine.clone();
+    tokio::spawn(async move {
+        if let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(8)).build() {
+            let _ = engine.subscriptions.candidates(&client).await;
+        }
+    });
+    reply(Ok(json!({"ok":true,"message":"Tracker 订阅已保存，正在加载候选；不会自动重载下载任务。"})))
 }
 
 async fn select_files(State(s): State<ApiState>, Json(v): Json<Value>) -> Response {
