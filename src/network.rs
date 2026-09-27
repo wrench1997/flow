@@ -223,6 +223,16 @@ pub async fn probe(input: &std::path::Path, output: &std::path::Path) -> anyhow:
     let mut settings = Settings::defaults(&root);
     settings.listen_port = 0;
     settings.upnp_enabled = false;
+    for (key, setting) in [
+        ("tcp_enabled", &mut settings.tcp_enabled),
+        ("utp_enabled", &mut settings.utp_enabled),
+        ("ipv6_enabled", &mut settings.ipv6_enabled),
+    ] {
+        if let Some(value) = input.get(key) {
+            *setting = value.as_bool().context("诊断网络开关必须为布尔值")?;
+        }
+    }
+    settings.validate()?;
     std::fs::write(
         root.join("data/settings.json"),
         serde_json::to_vec(&settings)?,
