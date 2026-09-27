@@ -235,3 +235,5 @@ Tray controls: right-click opens Show main window / Stop downloads and exit; a s
 Toolbar actions use vector icons with localized hover hints. Tracker subscriptions can be opened directly from the toolbar or Settings, even without a selected task. Settings and utility windows cannot be collapsed.
 
 Exit from the tray requests engine shutdown immediately, independently of pending status requests, then closes the hidden window and saves task state.
+
+Saving Tracker subscriptions now confirms the save and loads candidates in the background without reloading download tasks. The Tracker page shows loading progress, candidate counts and source refresh/cache details, and distinguishes addresses loaded into the engine from candidates awaiting application. Loaded configuration does not prove an active connection or download; peer-to-Tracker attribution is not currently available. Saving settings no longer waits for an ongoing network refresh.
