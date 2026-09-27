@@ -9,7 +9,21 @@ $repository=Split-Path $PSScriptRoot
 New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
 $OutputDirectory=(Resolve-Path -LiteralPath $OutputDirectory).Path
 if((Resolve-Path -LiteralPath $Executable).Path -ne (Join-Path $OutputDirectory 'Flow.exe')){Copy-Item -LiteralPath $Executable -Destination (Join-Path $OutputDirectory 'Flow.exe')}
-Copy-Item -LiteralPath $Executable -Destination (Join-Path $OutputDirectory "Flow-Setup-$Version-x64.exe")
+$toolTarget=if($env:CARGO_TARGET_DIR){$env:CARGO_TARGET_DIR}else{Join-Path $repository 'target'}
+& cargo build --release --locked --manifest-path (Join-Path $repository 'tools/uninstaller/Cargo.toml') --target-dir $toolTarget
+if($LASTEXITCODE -ne 0){throw 'Uninstaller build failed'}
+$oldPayload=$env:FLOW_MAIN_PAYLOAD
+$oldUninstaller=$env:FLOW_UNINSTALLER_PATH
+try{
+    $env:FLOW_MAIN_PAYLOAD=(Resolve-Path -LiteralPath $Executable).Path
+    $env:FLOW_UNINSTALLER_PATH=Join-Path $toolTarget 'release/flow-uninstaller.exe'
+    & cargo build --release --locked --manifest-path (Join-Path $repository 'tools/installer/Cargo.toml') --target-dir $toolTarget
+    if($LASTEXITCODE -ne 0){throw 'Installer build failed'}
+}finally{
+    $env:FLOW_MAIN_PAYLOAD=$oldPayload
+    $env:FLOW_UNINSTALLER_PATH=$oldUninstaller
+}
+Copy-Item -LiteralPath (Join-Path $toolTarget 'release/flow-installer.exe') -Destination (Join-Path $OutputDirectory "Flow-Setup-$Version-x64.exe")
 $portable=Join-Path $OutputDirectory "Flow-$Version-portable"
 New-Item -ItemType Directory -Force $portable | Out-Null
 Copy-Item -LiteralPath $Executable -Destination (Join-Path $portable 'Flow.exe')

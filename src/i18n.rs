@@ -254,6 +254,17 @@ mod tests {
             "Requested 5 blocks; no data received. 2 peers claim needed pieces; 1 do not permit transfer."
         );
         assert_eq!(translate("等待来源", false), "等待来源");
+        for (zh, en) in [
+            ("全部任务", "All tasks"),
+            ("下载中", "Downloading"),
+            ("已暂停", "Paused"),
+            ("已完成", "Completed"),
+            ("错误", "Error"),
+            ("退出程序", "Exit"),
+        ] {
+            assert_eq!(translate(zh, true), en);
+            assert_eq!(translate(zh, false), zh);
+        }
     }
     #[test]
     fn every_template_preserves_placeholder_order() {

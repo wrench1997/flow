@@ -97,10 +97,13 @@ foreach($entry in $entries){
     );
     Ok(())
 }
-fn place_payload(source: &Path, root: &Path) -> Result<()> {
+fn place_payload(_source: &Path, root: &Path) -> Result<()> {
     let target = root.join("Flow.exe");
     let staged = root.join("Flow.installing.exe");
-    std::fs::copy(source, &staged)?;
+    #[cfg(all(feature = "standalone-installer", not(test)))]
+    std::fs::write(&staged, include_bytes!(env!("FLOW_MAIN_PAYLOAD")))?;
+    #[cfg(any(not(feature = "standalone-installer"), test))]
+    std::fs::copy(_source, &staged)?;
     let mut backup = None;
     if target.exists() {
         let dir = root.join("data/install-backups");
@@ -116,7 +119,11 @@ fn place_payload(source: &Path, root: &Path) -> Result<()> {
         return Err(error.into());
     }
 
-    std::fs::copy(&target, root.join("Flow-Uninstall.exe")).context("创建卸载程序失败")?;
+    std::fs::write(
+        root.join("Flow-Uninstall.exe"),
+        include_bytes!(env!("FLOW_UNINSTALLER_PATH")),
+    )
+    .context("创建卸载程序失败")?;
     Ok(())
 }
 fn install(source: &Path, root: &Path, desktop: bool) -> Result<()> {
@@ -463,7 +470,7 @@ mod tests {
         assert_eq!(std::fs::read(dir.path().join("Flow.exe")).unwrap(), b"new");
         assert_eq!(
             std::fs::read(dir.path().join("Flow-Uninstall.exe")).unwrap(),
-            b"new"
+            include_bytes!(env!("FLOW_UNINSTALLER_PATH")).as_slice()
         );
         assert_eq!(
             std::fs::read(dir.path().join("data/tasks.json")).unwrap(),

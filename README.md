@@ -15,7 +15,7 @@ One executable starts both the desktop interface and embedded download engine. N
 
 ## Packaging and updates
 
-- Windows installer: detects a previous registered installation and reuses its directory for an in-place upgrade, preserving settings and downloads. Choose a per-user installation directory, create shortcuts and register an uninstall entry. Installation includes `Flow-Uninstall.exe`; use it, the Start menu's Uninstall Flow shortcut, or Windows Installed apps. Exit Flow from the tray before uninstalling. Uninstall retains downloads, runtime and personal data. Reinstall to add these entries to an older installation; portable copies can be removed manually.
+- Windows installer: detects a previous registered installation and reuses its directory for an in-place upgrade, preserving settings and downloads. Choose a per-user installation directory, create shortcuts and register an uninstall entry. Installation includes a small, independently compiled `Flow-Uninstall.exe` without the download engine or player; use it, the Start menu's Uninstall Flow shortcut, or Windows Installed apps. Exit Flow from the tray before uninstalling. Uninstall retains downloads, runtime and personal data. Reinstall to add these entries to an older installation; portable copies can be removed manually.
 - Portable ZIP: extract the folder and run `Flow.exe`, with no installation required.
 - Automatic update checks on startup, manual checks, download progress and confirmation before replacing the executable. Installation stops Flow and restarts it afterward, preserving user data and an old-executable backup.
 - Configurable HTTPS GitHub mirror prefix, with fallback to GitHub. Signed update manifests and SHA-256 verification are enforced even through a mirror.
@@ -198,6 +198,7 @@ To move an installation, copy the executable and `data/` together and keep the r
 | Path | Responsibility |
 | --- | --- |
 | `src/main.rs` | Desktop interface and interactions |
+| `tools/installer/` / `tools/uninstaller/` | Independently compiled installer and small native uninstaller |
 | `src/backend.rs` | Embedded backend lifecycle |
 | `src/engine.rs` | Download sessions, tasks, persistence, and local API |
 | `src/http_download.rs` | HTTP transfers and validated resume |
@@ -228,3 +229,5 @@ Missing-piece coverage is the fraction of selected, not-yet-verified pieces anno
 Flow is an early desktop implementation. Persistent theme selection is not implemented. HTTP downloads use one connection per task and do not provide browser login/cookie integration or Content-Disposition filename extraction. Magnet metadata still requires reachable peers; adding Trackers cannot guarantee resolution. Applying new Tracker candidates requires verification. Connected complete seeder counts and global distributed availability remain unknown. WebSeeds require usable byte-range responses, pieces no larger than 32 MiB, and requests completing within 30 seconds; slow or incompatible servers may fail even when ordinary browser downloads work.
 
 Built with [egui](https://github.com/emilk/egui) and [librqbit](https://github.com/ikatson/rqbit).
+
+Tray controls: right-click opens Show main window / Stop downloads and exit; a single left-click does nothing, and a left double-click restores the main window.

@@ -1045,7 +1045,7 @@ impl eframe::App for DownloadApp {
                     self.player.open = true;
                 }
                 if ui
-                    .button("退出程序")
+                    .button(crate::i18n::t("退出程序"))
                     .on_hover_text(crate::i18n::t("停止下载并完全退出，包括后台引擎"))
                     .clicked()
                 {
@@ -1172,7 +1172,7 @@ impl eframe::App for DownloadApp {
                     .enumerate()
                 {
                     let count = tasks.iter().filter(|t| matches_filter(t, i)).count();
-                    ui.selectable_value(&mut self.filter, i, crate::i18n::t(format!("{label}    {count}")));
+                    ui.selectable_value(&mut self.filter, i, format!("{}    {count}", crate::i18n::t(label)));
                     ui.add_space(4.0);
                 }
                 ui.separator();

@@ -416,3 +416,5 @@ HTTP WebSeed 请求失败，正在退避等待重试；当前没有在线 BT 节
 语言设置保存失败：{}|Cannot save language preference: {}
 语言已切换，下载不受影响。|Language changed; downloads continue unaffected.
 已找到旧版 Flow，将在此目录覆盖升级，保留配置和下载文件。|Previous Flow installation found. Upgrade in this folder while keeping settings and downloads.
+显示主界面|Show main window
+停止下载并退出|Stop downloads and exit

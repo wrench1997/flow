@@ -23,8 +23,8 @@ impl Tray {
             menu::{Menu, MenuEvent, MenuItem},
         };
         let menu = Menu::new();
-        let show = MenuItem::new(crate::i18n::t("显示 Flow"), true, None);
-        let exit = MenuItem::new(crate::i18n::t("退出并停止下载"), true, None);
+        let show = MenuItem::new(crate::i18n::t("显示主界面"), true, None);
+        let exit = MenuItem::new(crate::i18n::t("停止下载并退出"), true, None);
         menu.append(&show)?;
         menu.append(&exit)?;
         let (tx, events) = mpsc::channel();
@@ -38,14 +38,13 @@ impl Tray {
                 let _ = sender.send(Action::Show);
             }
             if event.id == exit_id {
-                wake_window(native);
                 let _ = sender.send(Action::Exit);
             }
             context.request_repaint();
         }));
         let context = ctx.clone();
         tray_icon::TrayIconEvent::set_event_handler(Some(move |event| {
-            if matches!(event, tray_icon::TrayIconEvent::DoubleClick { .. }) {
+            if shows_window(&event) {
                 wake_window(native);
                 let _ = tx.send(Action::Show);
                 context.request_repaint();
@@ -56,6 +55,8 @@ impl Tray {
         let icon = TrayIconBuilder::new()
             .with_icon(icon)
             .with_menu(Box::new(menu))
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(true)
             .with_tooltip(crate::i18n::t("Flow · 双击显示窗口 / 右键退出"))
             .build()?;
         Ok(Self {
@@ -69,12 +70,55 @@ impl Tray {
     pub fn refresh_language(&mut self) {
         let english = crate::i18n::english();
         if english != self.english {
-            self.show.set_text(crate::i18n::t("显示 Flow"));
-            self.exit.set_text(crate::i18n::t("退出并停止下载"));
+            self.show.set_text(crate::i18n::t("显示主界面"));
+            self.exit.set_text(crate::i18n::t("停止下载并退出"));
             let _ = self
                 ._icon
                 .set_tooltip(Some(crate::i18n::t("Flow · 双击显示窗口 / 右键退出")));
             self.english = english;
+        }
+    }
+}
+fn shows_window(event: &tray_icon::TrayIconEvent) -> bool {
+    matches!(
+        event,
+        tray_icon::TrayIconEvent::DoubleClick {
+            button: tray_icon::MouseButton::Left,
+            ..
+        }
+    )
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_left_double_click_opens_main_window() {
+        use tray_icon::{
+            MouseButton, MouseButtonState, Rect, TrayIconEvent, TrayIconId,
+            dpi::{PhysicalPosition, PhysicalSize},
+        };
+        let rect = Rect {
+            position: PhysicalPosition::new(0., 0.),
+            size: PhysicalSize::new(16, 16),
+        };
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            assert_eq!(
+                super::shows_window(&TrayIconEvent::DoubleClick {
+                    id: TrayIconId::new("test"),
+                    position: PhysicalPosition::new(0., 0.),
+                    rect,
+                    button
+                }),
+                button == MouseButton::Left
+            );
+            for button_state in [MouseButtonState::Down, MouseButtonState::Up] {
+                assert!(!super::shows_window(&TrayIconEvent::Click {
+                    id: TrayIconId::new("test"),
+                    position: PhysicalPosition::new(0., 0.),
+                    rect,
+                    button,
+                    button_state
+                }));
+            }
         }
     }
 }
