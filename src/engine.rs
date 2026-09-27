@@ -57,6 +57,7 @@ pub struct Engine {
     operations: tokio::sync::Mutex<()>,
     loading: Mutex<BTreeMap<String, Value>>,
     completed_cache: Mutex<BTreeMap<String, Value>>,
+    webseeds: Mutex<BTreeMap<String, Arc<crate::webseed::Bridge>>>,
     peer_quality: Mutex<BTreeMap<String, BTreeMap<String, crate::peer_quality::Window>>>,
     peer_records: Mutex<BTreeMap<String, Value>>,
     active_bans: std::collections::BTreeSet<String>,
@@ -283,6 +284,7 @@ impl Engine {
             operations: tokio::sync::Mutex::new(()),
             loading: Mutex::new(BTreeMap::new()),
             completed_cache: Mutex::new(BTreeMap::new()),
+            webseeds: Mutex::new(BTreeMap::new()),
             peer_quality: Mutex::new(BTreeMap::new()),
             peer_records: Mutex::new(peer_records),
             active_bans,
@@ -414,6 +416,7 @@ impl Engine {
         if self.handles.lock().unwrap().contains_key(id) {
             return Ok(());
         }
+        self.webseeds.lock().unwrap().remove(id);
         if entry.deletion_files.is_some() {
             bail!("此任务有尚未完成的删除操作，请重新删除任务");
         }
@@ -548,13 +551,53 @@ impl Engine {
             .map(Ok)
             .unwrap_or_else(|| output_path(&bytes, Path::new(&entry.save_path)))?;
         atomic(&metadata_file, &bytes)?;
+        let mut initial_peers = seen_peers.clone();
+        let bridge = match crate::webseed::Layout::parse(&bytes, Some(&entry.source)) {
+            Ok(Some(layout)) => {
+                let count = layout.sources.len();
+                let hash = librqbit::torrent_from_bytes(&bytes)?.info_hash.0;
+                match crate::webseed::Bridge::start(layout, hash, !entry.paused).await {
+                    Ok(bridge) => {
+                        initial_peers.push(bridge.address);
+                        self.event(
+                            id,
+                            "info",
+                            "webseed",
+                            &format!(
+                                "发现 {count} 个 HTTP WebSeed 候选；收到并校验分片前不视为可用来源"
+                            ),
+                        );
+                        Some(bridge)
+                    }
+                    Err(error) => {
+                        self.event(
+                            id,
+                            "warn",
+                            "webseed",
+                            &format!("WebSeed 初始化失败：{error}"),
+                        );
+                        None
+                    }
+                }
+            }
+            Ok(None) => None,
+            Err(error) => {
+                self.event(
+                    id,
+                    "warn",
+                    "webseed",
+                    &format!("WebSeed 元数据暂不支持：{error}"),
+                );
+                None
+            }
+        };
         let opts = AddTorrentOptions {
             only_files: entry.only_files.clone(),
             paused: true,
             overwrite: true,
             output_folder: Some(output.display().to_string()),
             trackers: Some(entry.trackers.clone()),
-            initial_peers: Some(seen_peers.clone()),
+            initial_peers: Some(initial_peers),
             ..Default::default()
         };
         let response = self
@@ -562,6 +605,9 @@ impl Engine {
             .add_torrent(AddTorrent::from_bytes(bytes), Some(opts))
             .await?;
         let handle = response.into_handle().context("引擎未返回下载任务")?;
+        if let Some(bridge) = bridge {
+            self.webseeds.lock().unwrap().insert(id.into(), bridge);
+        }
         // Pause requests made while file opening was in progress must win.
         let entry = self.entry(id)?;
         if self
@@ -634,6 +680,9 @@ impl Engine {
                 };
                 let stats = handle.stats();
                 let state = stats.state;
+                if let Some(bridge) = engine.webseeds.lock().unwrap().get(&task_id) {
+                    bridge.set_enabled(!entry.paused && !stats.finished);
+                }
                 if stats.finished && !engine.settings.lock().unwrap().seed_after_download {
                     let result = async {
                         if matches!(state, librqbit::TorrentStatsState::Live) {
@@ -898,12 +947,18 @@ impl Engine {
                     return Ok(());
                 }
                 if action == "pause" {
+                    if let Some(bridge) = self.webseeds.lock().unwrap().get(id) {
+                        bridge.set_enabled(false);
+                    }
                     if !h.is_paused()
                         && !matches!(h.stats().state, librqbit::TorrentStatsState::Paused)
                     {
                         self.session.pause(&h).await?;
                     }
                 } else {
+                    if let Some(bridge) = self.webseeds.lock().unwrap().get(id) {
+                        bridge.set_enabled(true);
+                    }
                     if h.is_paused()
                         || matches!(
                             h.stats().state,
@@ -926,6 +981,7 @@ impl Engine {
                 }
                 self.handles.lock().unwrap().remove(id);
                 self.entries.lock().unwrap().retain(|e| e.id != id);
+                self.webseeds.lock().unwrap().remove(id);
             }
             "recheck" | "apply_trackers" => {
                 let h = handle.context("任务尚未载入")?;
@@ -933,6 +989,7 @@ impl Engine {
                     .delete(TorrentIdOrHash::Id(h.id()), false)
                     .await?;
                 self.handles.lock().unwrap().remove(id);
+                self.webseeds.lock().unwrap().remove(id);
                 drop(_operation);
                 self.load(id).await?;
                 self.event(
@@ -1097,6 +1154,7 @@ impl Engine {
         }
         self.entries.lock().unwrap().retain(|e| e.id != id);
         self.discovery.lock().unwrap().remove(id);
+        self.webseeds.lock().unwrap().remove(id);
         self.persist()?;
         self.event(
             id,
@@ -1334,16 +1392,25 @@ impl Engine {
                 && !handle.is_paused()
                 && !stats.finished
                 && stats.error.is_none()
-                && stats.live.as_ref().is_some_and(|live| {
-                    live.download_speed.as_bytes() == 0 && live.snapshot.peer_stats.live == 0
-                });
+                && stats
+                    .live
+                    .as_ref()
+                    .is_some_and(|live| live.download_speed.as_bytes() == 0);
             let due = self
                 .recovery
                 .lock()
                 .unwrap()
                 .entry(id.clone())
                 .or_default()
-                .due(trackers::now(), stalled, stats.progress_bytes);
+                .due(
+                    trackers::now(),
+                    stalled,
+                    stats.progress_bytes,
+                    stats
+                        .live
+                        .as_ref()
+                        .is_some_and(|live| live.snapshot.peer_stats.live > 0),
+                );
             if !due {
                 continue;
             }
@@ -1354,7 +1421,11 @@ impl Engine {
             }
             .await;
             match result {
-                Ok(()) => self.event(&id, "info", "peer_recovery", "连续两分钟无连接且无进展，已重新启动节点发现；保留已有数据，十分钟内不重复触发"),
+                Ok(()) => self.event(&id, "info", "peer_recovery", if stats.live.as_ref().is_some_and(|live| live.snapshot.peer_stats.live > 0) {
+                    "连续五分钟有连接但无进展，已重新启动节点发现；不据此判定对端恶意，保留已有数据，十分钟内不重复触发"
+                } else {
+                    "连续两分钟无连接且无进展，已重新启动节点发现；保留已有数据，十分钟内不重复触发"
+                }),
                 Err(error) => self.event(&id, "warn", "peer_recovery", &format!("节点发现恢复失败：{error}；可手动继续任务")),
             }
         }
@@ -1373,6 +1444,12 @@ impl Engine {
             let Some(live) = handle.live() else {
                 continue;
             };
+            let adapter_address = self
+                .webseeds
+                .lock()
+                .unwrap()
+                .get(&id)
+                .map(|bridge| bridge.address);
             let mut good = live
                 .per_peer_stats_snapshot(
                     serde_json::from_value(json!({"state":"all"})).expect("valid peer filter"),
@@ -1386,6 +1463,7 @@ impl Engine {
                 })
                 .filter(|(addr, p)| {
                     addr.port() != 0
+                        && Some(*addr) != adapter_address
                         && !addr.ip().is_unspecified()
                         && !addr.ip().is_multicast()
                         && p.counters.fetched_bytes > 0
@@ -1446,6 +1524,9 @@ impl Engine {
         let mut detail = json!({"files":[],"peers":[],"trackers":[],"discovery":self.discovery.lock().unwrap().get(selected).cloned().unwrap_or(json!({}))});
         for e in entries {
             let mut item = json!({"id":e.id,"name":e.source,"save_path":e.save_path,"paused":e.paused,"error":e.error,"progress":0,"download_rate":0,"upload_rate":0,"done":0,"total":0,"peers":0,"seeds":null,"availability":-1,"state":"loading","diagnosis":if e.error.is_empty(){"正在解析元数据或载入任务"}else{&e.error}});
+            if let Some(bridge) = self.webseeds.lock().unwrap().get(&e.id) {
+                item["webseeds"] = bridge.snapshot();
+            }
             if e.error.is_empty() {
                 if let Some(load) = self.loading.lock().unwrap().get(&e.id) {
                     item["total"] = load["total"].clone();
@@ -1582,12 +1663,40 @@ impl Engine {
                         )
                     })
                     .unwrap_or((0, 0, json!({})));
-                let live_peers = peers["live"].as_u64().unwrap_or(0);
-                let peer_details = h.live().map(|live| {
+                let mut live_peers = peers["live"].as_u64().unwrap_or(0);
+                let adapter_address = self
+                    .webseeds
+                    .lock()
+                    .unwrap()
+                    .get(&e.id)
+                    .map(|bridge| bridge.address);
+                let coverage = h
+                    .live()
+                    .and_then(|live| live.source_coverage(adapter_address));
+                if let Some(coverage) = &coverage {
+                    if coverage.known_peers > 0 && coverage.missing_pieces > 0 {
+                        item["availability"] = json!(
+                            coverage.covered_missing_pieces as f64 / coverage.missing_pieces as f64
+                        );
+                    }
+                    item["coverage"] = serde_json::to_value(coverage).unwrap();
+                }
+                let mut peer_details = h.live().map(|live| {
                     live.per_peer_stats_snapshot(
                         serde_json::from_value(json!({"state":"all"})).expect("valid peer filter"),
                     )
                 });
+                // The WebSeed loopback adapter is a transport, not a swarm peer.
+                // Never rank/cache it as a real node or infer availability from it.
+                if let Some(bridge) = self.webseeds.lock().unwrap().get(&e.id) {
+                    if let Some(details) = peer_details.as_mut() {
+                        if let Some(peer) = details.peers.remove(&bridge.address.to_string()) {
+                            if peer.state == "live" {
+                                live_peers = live_peers.saturating_sub(1);
+                            }
+                        }
+                    }
+                }
                 let attempts: u64 = peer_details
                     .as_ref()
                     .map(|p| {
@@ -1632,7 +1741,7 @@ impl Engine {
                             if q.rank == 0 {
                                 stable_peers += 1;
                             }
-                            peer_rows.push(json!({"address":addr,"client":peer.client_name.clone().unwrap_or_default(),"downloaded":peer.counters.fetched_bytes,"uploaded":peer.counters.uploaded_bytes,"errors":peer.counters.errors,"state":peer.state,"transfer_rank":q.rank,"recent_rate":q.rate,"idle_seconds":q.idle,"transfer_status":if peer.state == "dead" && peer.counters.fetched_bytes > 0 { "已断开 · 曾有效传输" } else { q.label }}));
+                            peer_rows.push(json!({"address":addr,"client":peer.client_name.clone().unwrap_or_default(),"download_choked":peer.download_choked,"pending_requests":peer.inflight_requests,"downloaded":peer.counters.fetched_bytes,"uploaded":peer.counters.uploaded_bytes,"errors":peer.counters.errors,"state":peer.state,"transfer_rank":q.rank,"recent_rate":q.rate,"idle_seconds":q.idle,"transfer_status":if peer.state == "dead" && peer.counters.fetched_bytes > 0 { "已断开 · 曾有效传输" } else { q.label }}));
                         }
                     }
                 }
@@ -1707,9 +1816,28 @@ impl Engine {
                 } else if stats.finished {
                     "下载完成，正在做种".into()
                 } else if down > 0 {
+                    let verified_webseeds = item["webseeds"].as_array().map_or(0, |rows| {
+                        rows.iter()
+                            .filter(|row| row["verified_bytes"].as_u64().unwrap_or(0) > 0)
+                            .count()
+                    });
                     format!(
-                        "正在接收数据；当前连接 {live_peers} 个，已观察到持续收数节点 {stable_peers} 个"
+                        "正在接收数据；当前 BT 连接 {live_peers} 个，已观察到持续收数节点 {stable_peers} 个，已有校验通过传输记录的 HTTP WebSeed {verified_webseeds} 个（历史记录不代表当前可用）"
                     )
+                } else if live_peers == 0
+                    && item["webseeds"].as_array().is_some_and(|sources| {
+                        sources
+                            .iter()
+                            .any(|source| source["active_requests"].as_u64().unwrap_or(0) > 0)
+                    })
+                {
+                    "HTTP WebSeed 正在请求并校验分片，尚未收到可交给引擎的完整数据；当前没有在线 BT 节点".into()
+                } else if live_peers == 0
+                    && item["webseeds"].as_array().is_some_and(|sources| {
+                        sources.iter().any(|source| source["state"] == "backoff")
+                    })
+                {
+                    "HTTP WebSeed 请求失败，正在退避等待重试；当前没有在线 BT 节点，历史校验传输不代表当前可用".into()
                 } else if live_peers == 0 && attempts > 0 {
                     format!(
                         "已找到候选节点，累计尝试连接 {attempts} 次，节点错误 {connection_errors} 次，目前无连接；引擎继续重试。Tracker 报告数不代表可连接节点"
@@ -1725,7 +1853,25 @@ impl Engine {
                         e.initial_peers.len()
                     )
                 } else {
-                    "节点已连接但暂无数据：可能被对端限速或没有当前所需分片；引擎尚未提供可区分两者的指标".into()
+                    match coverage.as_ref() {
+                        Some(c) if c.known_peers == 0 => {
+                            "节点已连接，尚未取得分片声明，无法判断所缺分片覆盖率".into()
+                        }
+                        Some(c) if c.peers_with_needed_pieces == 0 => format!(
+                            "已读取 {} 个在线节点的分片声明，未发现当前所缺分片；另有 {} 个节点尚未提供声明。这不是整个网络无来源的证明",
+                            c.known_peers, c.unknown_peers
+                        ),
+                        Some(c) if c.needed_peers_choked == c.peers_with_needed_pieces => format!(
+                            "{} 个节点声明持有所缺分片，但当前全部处于 choke（未允许传输）状态；等待对端调度，不据此判定恶意",
+                            c.peers_with_needed_pieces
+                        ),
+                        Some(c) if c.pending_requests > 0 => format!(
+                            "已请求 {} 个数据块，暂未收到数据；声明持有所缺分片的节点 {} 个，其中 {} 个当前未允许传输",
+                            c.pending_requests, c.peers_with_needed_pieces, c.needed_peers_choked
+                        ),
+                        _ => "节点声明有需要的分片且允许传输，尚未观察到数据块传来；等待请求调度"
+                            .into(),
+                    }
                 };
                 if let Some(metadata) = h.metadata.load_full() {
                     item["media_files"] = json!(metadata.file_infos.iter().enumerate()
@@ -1736,6 +1882,8 @@ impl Engine {
                 item["name"] = json!(h.name().unwrap_or_else(|| e.source.clone()));
                 item["state"] = json!(if initializing {
                     "checking".to_string()
+                } else if actually_paused && stats.finished {
+                    "complete".to_string()
                 } else {
                     stats.state.to_string()
                 });
@@ -2171,6 +2319,7 @@ pub async fn serve(
     snapshot_task.abort();
     maintenance_task.abort();
     engine.persist()?;
+    engine.webseeds.lock().unwrap().clear();
     let jobs: Vec<_> = engine.http_jobs.lock().unwrap().values().cloned().collect();
     for job in jobs {
         let _ = job.stop().await;
@@ -2235,30 +2384,61 @@ mod tests {
         // or the placeholder from a bare magnet. UTF-8 names take precedence.
         use serde_bencode::value::Value as B;
         let title = "Arcane.S02.COMPLETE.REPACK.1080p.NF.WEB-DL.DDP5.1.Atmos.H.264-FLUX[TGx]";
-        let info = B::Dict([
-            (b"name".to_vec(), B::Bytes(b"legacy-title".to_vec())),
-            (b"name.utf-8".to_vec(), B::Bytes(title.as_bytes().to_vec())),
-            (b"piece length".to_vec(), B::Int(16384)),
-            (b"pieces".to_vec(), B::Bytes(vec![0; 20])),
-            (b"files".to_vec(), B::List(vec![B::Dict([
-                (b"length".to_vec(), B::Int(1)),
-                (b"path".to_vec(), B::List(vec![B::Bytes(b"episode.mkv".to_vec())])),
-            ].into_iter().collect())])),
-        ].into_iter().collect());
-        let bytes = serde_bencode::to_bytes(&B::Dict([(b"info".to_vec(), info)].into_iter().collect())).unwrap();
+        let info = B::Dict(
+            [
+                (b"name".to_vec(), B::Bytes(b"legacy-title".to_vec())),
+                (b"name.utf-8".to_vec(), B::Bytes(title.as_bytes().to_vec())),
+                (b"piece length".to_vec(), B::Int(16384)),
+                (b"pieces".to_vec(), B::Bytes(vec![0; 20])),
+                (
+                    b"files".to_vec(),
+                    B::List(vec![B::Dict(
+                        [
+                            (b"length".to_vec(), B::Int(1)),
+                            (
+                                b"path".to_vec(),
+                                B::List(vec![B::Bytes(b"episode.mkv".to_vec())]),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )]),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let bytes =
+            serde_bencode::to_bytes(&B::Dict([(b"info".to_vec(), info)].into_iter().collect()))
+                .unwrap();
         let parsed = librqbit::torrent_from_bytes(&bytes).unwrap();
         std::fs::write(engine.data.join("collection.torrent"), &bytes).unwrap();
-        std::fs::write(engine.data.join("rqbit").join(format!("{:?}.bitv", parsed.info_hash)), [0x80]).unwrap();
+        std::fs::write(
+            engine
+                .data
+                .join("rqbit")
+                .join(format!("{:?}.bitv", parsed.info_hash)),
+            [0x80],
+        )
+        .unwrap();
         engine.entries.lock().unwrap().push(Entry {
             id: "collection".into(),
-            source: format!("magnet:?xt=urn:btih:{}&dn=wrong-title", parsed.info_hash.as_string()),
+            source: format!(
+                "magnet:?xt=urn:btih:{}&dn=wrong-title",
+                parsed.info_hash.as_string()
+            ),
             paused: true,
             save_path: temp.path().join("downloads").display().to_string(),
             ..Default::default()
         });
         engine.restore().await;
         let state = engine.snapshot("collection");
-        let collection = state["tasks"].as_array().unwrap().iter().find(|task| task["id"] == "collection").unwrap();
+        let collection = state["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == "collection")
+            .unwrap();
         assert_eq!(collection["name"], title);
         assert_eq!(collection["state"], "complete");
         assert!(engine.handle("collection").is_err());
@@ -2281,6 +2461,125 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("engine condition timed out: {stage}"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn online_bitfields_choke_and_disconnect_produce_evidence() {
+        use serde_bencode::value::Value as B;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = tempfile::tempdir().unwrap();
+        let payload = vec![7u8; 65536];
+        let mut pieces = Vec::new();
+        use librqbit_sha1_wrapper::{ISha1, Sha1};
+        for part in payload.chunks(16384) {
+            let mut hash = Sha1::new();
+            hash.update(part);
+            pieces.extend_from_slice(&hash.finish());
+        }
+        let info = B::Dict(
+            [
+                (b"name".to_vec(), B::Bytes(b"evidence.bin".to_vec())),
+                (
+                    b"files".to_vec(),
+                    B::List(
+                        ["first.bin", "selected.bin"]
+                            .into_iter()
+                            .map(|name| {
+                                B::Dict(
+                                    [
+                                        (b"length".to_vec(), B::Int(32768)),
+                                        (
+                                            b"path".to_vec(),
+                                            B::List(vec![B::Bytes(name.as_bytes().to_vec())]),
+                                        ),
+                                    ]
+                                    .into_iter()
+                                    .collect(),
+                                )
+                            })
+                            .collect(),
+                    ),
+                ),
+                (b"piece length".to_vec(), B::Int(16384)),
+                (b"pieces".to_vec(), B::Bytes(pieces)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let torrent =
+            serde_bencode::to_bytes(&B::Dict([(b"info".to_vec(), info)].into_iter().collect()))
+                .unwrap();
+        let source = root.path().join("evidence.torrent");
+        std::fs::write(&source, torrent).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (commands, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut handshake = [0u8; 68];
+            socket.read_exact(&mut handshake).await.unwrap();
+            handshake[20..28].fill(0);
+            handshake[48..].copy_from_slice(b"-FLOWTEST-0000000000");
+            socket.write_all(&handshake).await.unwrap();
+            socket.write_all(&[0, 0, 0, 2, 5, 0xc0]).await.unwrap();
+            let mut buffer = [0u8; 4096];
+            loop {
+                tokio::select! {
+                    command = rx.recv() => { let Some(command) = command else { break }; if socket.write_all(&command).await.is_err() { break; } },
+                    read = socket.read(&mut buffer) => { if !matches!(read, Ok(n) if n>0) { break; } }
+                }
+            }
+        });
+        let engine = Engine::new(root.path(), true).await.unwrap();
+        engine.entries.lock().unwrap().push(Entry {
+            id: "evidence".into(),
+            source: source.display().to_string(),
+            save_path: root.path().join("downloads").display().to_string(),
+            initial_peers: vec![address],
+            ..Default::default()
+        });
+        engine.load("evidence").await.unwrap();
+        let task = || engine.snapshot("evidence")["tasks"][0].clone();
+        wait("partial live bitfield", || {
+            task()["coverage"]["covered_missing_pieces"] == 2
+        })
+        .await;
+        assert_eq!(task()["availability"], 0.5);
+        assert!(task()["diagnosis"].as_str().unwrap().contains("choke"));
+        engine.select_files("evidence", vec![1]).await.unwrap();
+        assert_eq!(task()["coverage"]["missing_pieces"], 2);
+        assert_eq!(task()["availability"], 0.0);
+        assert!(
+            task()["diagnosis"]
+                .as_str()
+                .unwrap()
+                .contains("未发现当前所缺分片")
+        );
+        commands.send(vec![0, 0, 0, 5, 4, 0, 0, 0, 2]).unwrap();
+        wait("HAVE extends selected coverage", || {
+            task()["coverage"]["covered_missing_pieces"] == 1
+        })
+        .await;
+        assert_eq!(task()["availability"], 0.5);
+        commands.send(vec![0, 0, 0, 5, 4, 0, 0, 0, 3]).unwrap();
+        wait(
+            "all selected missing pieces have an announced source",
+            || task()["coverage"]["covered_missing_pieces"] == 2,
+        )
+        .await;
+        assert_eq!(task()["availability"], 1.0);
+        commands.send(vec![0, 0, 0, 1, 1]).unwrap();
+        wait("unchoked requests awaiting data", || {
+            task()["coverage"]["pending_requests"].as_u64().unwrap_or(0) > 0
+        })
+        .await;
+        assert_eq!(task()["coverage"]["needed_peers_choked"], 0);
+        assert!(task()["diagnosis"].as_str().unwrap().contains("已请求"));
+        assert_eq!(task()["done"], 0);
+        server.abort();
+        wait("dead peers excluded", || task()["peers"] == 0).await;
+        assert_eq!(task()["availability"], -1);
+        engine.session.stop().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

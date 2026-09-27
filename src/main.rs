@@ -16,6 +16,7 @@ mod torrent_preview;
 mod trackers;
 mod tray;
 mod updater;
+mod webseed;
 
 use eframe::egui::{self, Color32, RichText};
 use serde_json::{Value, json};
@@ -707,11 +708,33 @@ impl DownloadApp {
                                 ("已完成", bytes(num(&t,"done")), "总大小", bytes(num(&t,"total"))),
                                 ("下载速度", format!("{}/s",bytes(num(&t,"download_rate"))), "上传速度", format!("{}/s",bytes(num(&t,"upload_rate")))),
                                 ("已连接用户", format!("{:.0}",num(&t,"peers")), "已连接做种者", if t["seeds"].is_number(){format!("{:.0}",num(&t,"seeds"))}else{"未知".into()}),
-                                ("资源可用率", if num(&t,"availability") < 0.0 {"未知".into()} else {format!("{:.3}",num(&t,"availability"))}, "引擎状态", text(&t,"state")),
+                                ("缺失分片覆盖", if num(&t,"availability") < 0.0 {"未知".into()} else {format!("{:.1}%（在线节点声明）",num(&t,"availability") * 100.0)}, "引擎状态", text(&t,"state")),
                             ] { ui.weak(a); ui.label(b); ui.weak(c); ui.label(d); ui.end_row(); }
                         });
                         ui.add_space(12.0);
                         ui.label(format!("保存位置：{}",text(&t,"save_path")));
+                        if t["coverage"].is_object() {
+                            let c=&t["coverage"];
+                            ui.weak(format!("所缺分片 {:.0}，在线节点声明覆盖 {:.0}；已知声明节点 {:.0}，未知声明节点 {:.0}。只表示在线声明，不保证传输。",num(c,"missing_pieces"),num(c,"covered_missing_pieces"),num(c,"known_peers"),num(c,"unknown_peers")));
+                        }
+                        if let Some(sources) = t["webseeds"].as_array() {
+                            egui::CollapsingHeader::new(format!("HTTP WebSeed · {} 个候选", sources.len())).show(ui, |ui| {
+                                ui.weak("HTTP 候选不计入 BT 节点数或资源可用率；验证字节是本次来源传输记录，不是任务完成度。");
+                                for source in sources {
+                                    ui.label(text(source,"url"));
+                                    let status = match text(source,"state").as_str() {
+                                        "requesting" => "正在请求并校验分片",
+                                        "rejected" => "错误数据 / 范围已隔离",
+                                        "backoff" => "请求失败，退避等待",
+                                        "verified_transfer" => "已有校验通过的传输",
+                                        _ => "尚未验证",
+                                    };
+                                    ui.label(format!("{status} · 校验通过 {} · 失败 {} 次", bytes(num(source,"verified_bytes")),num(source,"failures") as u64));
+                                    if !text(source,"error").is_empty() { ui.weak(text(source,"error")); }
+                                    ui.separator();
+                                }
+                            });
+                        }
                         ui.weak("默认完成后停止做种；可在设置中开启完成后继续做种。未知指标表示引擎没有公开该数据；Tracker 做种统计可在 Tracker 页查看。");
                     }
                     1 => {
@@ -789,7 +812,7 @@ impl DownloadApp {
                                 ui.label(bytes(num(&p,"uploaded")));
                                 ui.label(format!("{}/s", bytes(num(&p,"recent_rate"))));
                                 ui.label(text(&p,"transfer_status")).on_hover_text(format!("距开始观察或上次收数 {:.0} 秒",num(&p,"idle_seconds")));
-                                ui.label(text(&p,"state")); ui.end_row();
+                                ui.label(text(&p,"state")).on_hover_text(format!("对端允许传输：{}；等待响应的数据块：{}",match p["download_choked"].as_bool(){Some(true)=>"否（choke）",Some(false)=>"是",None=>"未知"},p["pending_requests"].as_u64().map(|n|n.to_string()).unwrap_or("未知".into()))); ui.end_row();
                             }
                         });
                     }
@@ -1208,7 +1231,7 @@ impl eframe::App for DownloadApp {
                                     "上传速度",
                                     "连接",
                                     "做种",
-                                    "可用率",
+                                    "分片覆盖",
                                 ] {
                                     ui.strong(title);
                                 }
@@ -1343,8 +1366,9 @@ impl eframe::App for DownloadApp {
                                     let last_cell = ui.label(if num(t, "availability") < 0.0 {
                                         "—".into()
                                     } else {
-                                        format!("{:.2}", num(t, "availability"))
+                                        format!("{:.1}%", num(t, "availability") * 100.0)
                                     });
+                                    last_cell.clone().on_hover_text("当前在线 BT 节点声明持有的所缺分片比例；不代表速度、实际传输或整个网络可用率。未知节点和 HTTP WebSeed 不计入；无可用声明或已完成时显示未知。");
                                     row_rects.push((id, response.rect.union(last_cell.rect)));
                                     ui.end_row();
                                 }

@@ -19,6 +19,7 @@ self-check.json
 *.tmp
 *.bak
 *.torrent
+!vendor/librqbit/resources/**/*.torrent
 *.resume
 *.fastresume
 *.exe

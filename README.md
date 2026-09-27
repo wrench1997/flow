@@ -210,8 +210,18 @@ To move an installation, copy the executable and `data/` together and keep the r
 
 Flow is currently unsigned. A user reported antivirus removal of a local preview build; the detection name and affected file have not been supplied, so the cause is unresolved. A new release is not proof that the detection is a false positive. Release checksums verify file identity, not safety. If blocked, keep the detection details for investigation instead of disabling protection.
 
+## Additional sources and transfer evidence
+
+Flow reads HTTP(S) WebSeeds from a torrent's `url-list` and magnet `ws` parameters. It requests byte ranges and verifies each complete piece against the torrent's SHA-1 before passing it to the download engine. Multi-file pieces may require boundary bytes from neighboring unselected files; unrelated files are not requested. Incorrect hashes and invalid range responses isolate that source for the current task session; temporary failures use retry backoff. Pause cancels active WebSeed requests.
+
+WebSeed candidates and historical verified bytes are displayed separately from BT peers. A responsive Tracker, a reported seeder count, and an HTTP candidate do not prove that data is currently downloadable. Verified bytes count transferred pieces, including repeat transfers, rather than task completion. A WebSeed must actually host the torrent's exact bytes; Flow does not discover arbitrary same-file mirrors or access BitComet's long-term seeding network.
+
+Automatic rediscovery observes two minutes without connections, or five minutes with connections but no progress, and uses a ten-minute retry cooldown. Paused and finished tasks are excluded. These observations indicate a stall, not malicious behavior by a peer.
+
+Missing-piece coverage is the fraction of selected, not-yet-verified pieces announced by current online BT peers. It excludes disconnected peers and the local WebSeed transport. Unknown peer declarations make this an observed lower bound, not global swarm availability; 100% does not guarantee delivery. Diagnosis distinguishes missing declarations, no needed pieces, choke, and outstanding requests. No online declarations, stopped tasks, and completed tasks display unknown coverage. The read-only engine extension is tracked in `vendor/librqbit/FLOW-PATCH.md`.
+
 ## Current limitations
 
-Flow is an early desktop implementation. Persistent theme selection is not implemented. HTTP downloads use one connection per task and do not provide browser login/cookie integration or Content-Disposition filename extraction. Magnet metadata still requires reachable peers; adding Trackers cannot guarantee resolution. Applying new Tracker candidates requires verification. Statistics that librqbit does not reliably expose, such as connected complete seeders and distributed availability, are shown as unknown.
+Flow is an early desktop implementation. Persistent theme selection is not implemented. HTTP downloads use one connection per task and do not provide browser login/cookie integration or Content-Disposition filename extraction. Magnet metadata still requires reachable peers; adding Trackers cannot guarantee resolution. Applying new Tracker candidates requires verification. Connected complete seeder counts and global distributed availability remain unknown. WebSeeds require usable byte-range responses, pieces no larger than 32 MiB, and requests completing within 30 seconds; slow or incompatible servers may fail even when ordinary browser downloads work.
 
 Built with [egui](https://github.com/emilk/egui) and [librqbit](https://github.com/ikatson/rqbit).

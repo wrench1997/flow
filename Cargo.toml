@@ -10,6 +10,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
+librqbit-sha1-wrapper = { version = "9.0.1", default-features = false, features = ["sha1-ring"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
 axum = "0.8"
 tokio-util = { version = "0.7", features = ["io"] }
@@ -29,6 +30,9 @@ ed25519-dalek = "2"
 
 [dev-dependencies]
 tempfile = "3"
+
+[patch.crates-io]
+librqbit = { path = "vendor/librqbit" }
 
 [build-dependencies]
 winresource = "0.1.31"

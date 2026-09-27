@@ -7,14 +7,16 @@ pub struct Recovery {
     progress: u64,
 }
 impl Recovery {
-    pub fn due(&mut self, now: u64, stalled: bool, progress: u64) -> bool {
+    pub fn due(&mut self, now: u64, stalled: bool, progress: u64, connected: bool) -> bool {
         if !stalled || self.progress != progress {
-            self.since = None;
+            self.since = stalled.then_some(now);
             self.progress = progress;
             return false;
         }
         let since = *self.since.get_or_insert(now);
-        if now.saturating_sub(since) < 120
+        // Give connected but choked/slow peers more time than a disconnected swarm.
+        let grace = if connected { 300 } else { 120 };
+        if now.saturating_sub(since) < grace
             || self
                 .last_attempt
                 .is_some_and(|t| now.saturating_sub(t) < 600)
@@ -103,14 +105,28 @@ mod tests {
     #[test]
     fn recovery_requires_stall_and_respects_progress_and_cooldown() {
         let mut r = Recovery::default();
-        assert!(!r.due(0, true, 0));
-        assert!(!r.due(119, true, 0));
-        assert!(r.due(120, true, 0));
-        assert!(!r.due(300, true, 0));
-        assert!(!r.due(720, false, 0));
-        assert!(!r.due(730, true, 1));
-        assert!(!r.due(740, true, 1));
-        assert!(r.due(860, true, 1));
+        assert!(!r.due(0, true, 0, false));
+        assert!(!r.due(119, true, 0, false));
+        assert!(r.due(120, true, 0, false));
+        assert!(!r.due(300, true, 0, false));
+        assert!(!r.due(720, false, 0, false));
+        assert!(!r.due(730, true, 1, false));
+        assert!(!r.due(740, true, 1, false));
+        assert!(r.due(860, true, 1, false));
+    }
+    #[test]
+    fn connected_stalls_have_longer_grace_and_progress_resets_observation() {
+        let mut r = Recovery::default();
+        assert!(!r.due(0, true, 0, true));
+        assert!(!r.due(120, true, 0, true));
+        assert!(!r.due(299, true, 0, true));
+        assert!(r.due(300, true, 0, true));
+        assert!(!r.due(600, true, 0, true));
+        assert!(!r.due(899, true, 0, true));
+        assert!(r.due(900, true, 0, true));
+        assert!(!r.due(1500, true, 1, true));
+        assert!(!r.due(1799, true, 1, true));
+        assert!(r.due(1800, true, 1, true));
     }
     #[test]
     fn sustained_transfer_outranks_bursts_and_idle_peers() {
