@@ -16,7 +16,12 @@ pub enum Icon {
 pub fn button(ui: &mut egui::Ui, enabled: bool, icon: Icon, hint: &str) -> egui::Response {
     let hint = crate::i18n::t(hint);
     let response = ui
-        .add_enabled(enabled, egui::Button::new("").min_size(vec2(26.0, 24.0)))
+        .add_enabled(
+            enabled,
+            egui::Button::new("")
+                .frame_when_inactive(false)
+                .min_size(vec2(26.0, 24.0)),
+        )
         .on_hover_text(&hint)
         .on_disabled_hover_text(&hint);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &hint));
@@ -105,26 +110,22 @@ pub fn button(ui: &mut egui::Ui, enabled: bool, icon: Icon, hint: &str) -> egui:
             }
         }
         Icon::Update => {
-            line((0., -8.), (0., 4.));
-            line((-4., 0.), (0., 4.));
-            line((0., 4.), (4., 0.));
-            p.add(egui::Shape::line(
-                vec![point(-8., 4.), point(-8., 9.), point(8., 9.), point(8., 4.)],
-                stroke,
-            ));
+            let points = (0..25)
+                .map(|i| {
+                    let a = 0.5 + i as f32 * (std::f32::consts::TAU - 1.0) / 24.;
+                    point(a.sin() * 8., -a.cos() * 8.)
+                })
+                .collect();
+            p.add(egui::Shape::line(points, stroke));
+            line((4., -7.), (4., -2.));
+            line((4., -2.), (9., -3.));
         }
         Icon::Theme => {
-            p.circle_stroke(center, 8. * scale, stroke);
-            p.add(egui::Shape::convex_polygon(
-                (0..17)
-                    .map(|i| {
-                        let a = std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 16.;
-                        point(a.cos() * 8., a.sin() * 8.)
-                    })
-                    .collect(),
-                stroke.color,
-                Stroke::NONE,
-            ));
+            p.circle_stroke(center, 4. * scale, stroke);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::TAU / 8.;
+                line((a.cos() * 7., a.sin() * 7.), (a.cos() * 10., a.sin() * 10.));
+            }
         }
     }
     response

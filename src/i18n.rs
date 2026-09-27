@@ -187,15 +187,20 @@ fn translate(input: &str, en: bool) -> String {
     input.to_owned()
 }
 pub fn selector(ui: &mut eframe::egui::Ui, id: &str) {
+    let compact = id == "main-language";
     let previous = preference();
     let mut selected = previous;
     eframe::egui::ComboBox::from_id_salt(id)
         .selected_text(match previous {
-            Language::Auto => t("自动（跟随系统）"),
-            Language::Chinese => "简体中文".into(),
+            Language::Auto => t(if compact {
+                "自动"
+            } else {
+                "自动（跟随系统）"
+            }),
+            Language::Chinese => if compact { "中文" } else { "简体中文" }.into(),
             Language::English => "English".into(),
         })
-        .width(130.0)
+        .width(if compact { 76.0 } else { 130.0 })
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut selected, Language::Auto, t("自动（跟随系统）"));
             ui.selectable_value(&mut selected, Language::Chinese, "简体中文");
