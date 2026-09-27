@@ -7,6 +7,7 @@ mod http_download;
 mod i18n;
 mod installer;
 mod media;
+mod network;
 mod open_request;
 mod peer_quality;
 mod player;
@@ -731,6 +732,9 @@ impl DownloadApp {
             let task = list(&self.state["tasks"]).into_iter().find(|t| text(t, "id") == self.selected);
             if self.tab == 5 { self.chart(ui); }
             else if self.tab == 4 {
+                crate::network::ui(ui,&self.state["network"]);
+                if ui.button(crate::i18n::t("检查本机监听")).clicked() {let _=self.tx.send(Command::Post("/api/network-check",json!({})));}
+                ui.separator();
                 if ui.button(crate::i18n::t("复制当前诊断 JSON")).clicked() {
                     ui.ctx().copy_text(serde_json::to_string_pretty(&self.state).unwrap_or_default());
                     self.message = "诊断已复制到剪贴板（包含本机路径和对等连接地址）".into();
@@ -748,6 +752,21 @@ impl DownloadApp {
                         ui.label(RichText::new(text(&t,"name")).strong().size(17.0));
                         ui.add_space(6.0);
                         ui.colored_label(if text(&t, "error").is_empty() { Color32::from_rgb(36,140,125) } else { Color32::from_rgb(208,89,89) }, crate::i18n::t(text(&t,"diagnosis")));
+                        if ui.small_button(crate::i18n::t("网络与找源诊断")).clicked() {self.tab=4;}
+                        if let Some(peers)=t["resolution"]["peers"].as_array() {
+                            egui::CollapsingHeader::new(crate::i18n::t("元数据找源记录（本次会话）")).show(ui,|ui| {
+                                ui.weak(crate::i18n::t("元数据字节不是文件下载量；仅记录已观察到的节点，最多 256 个。"));
+                                egui::Grid::new("metadata_peers").striped(true).num_columns(5).show(ui,|ui| {
+                                    for h in ["地址","发现渠道","解析阶段","协议","错误原因"] {ui.strong(crate::i18n::t(h));}ui.end_row();
+                                    for peer in peers {
+                                        ui.label(text(peer,"address"));
+                                        ui.label(list(&peer["sources"]).iter().filter_map(Value::as_str).map(crate::i18n::t).collect::<Vec<_>>().join(" / "));
+                                        ui.label(crate::i18n::t(match text(peer,"state").as_str(){"discovered"=>"已发现", "connecting"=>"连接中", "handshaking"=>"握手中", "waiting_metadata"=>"等待元数据", "receiving_metadata"=>"接收元数据", "metadata_ready"=>"元数据已验证", "failed"=>"失败", "cancelled"=>"本次尝试已停止", _=>"未知"}));
+                                        ui.label(text(peer,"transport"));ui.label(text(peer,"error"));ui.end_row();
+                                    }
+                                });
+                            });
+                        }
                         ui.add_space(8.0);
                         egui::Grid::new("overview").num_columns(4).spacing([24.0, 10.0]).show(ui, |ui| {
                             for (a,b,c,d) in [
@@ -852,12 +871,12 @@ impl DownloadApp {
                         egui::Grid::new("peers").striped(true).num_columns(7).min_col_width(120.0).show(ui, |ui| {
                             for h in ["地址", "客户端", "累计接收", "累计上传", "近期接收均速", "传输观察", "连接状态"] {ui.strong(crate::i18n::t(h));} ui.end_row();
                             for p in list(&self.state["detail"]["peers"]) {
-                                ui.label(crate::i18n::t(text(&p,"address"))); ui.label(text(&p,"client"));
+                                ui.label(crate::i18n::t(text(&p,"address"))).on_hover_text(text(&p,"error")); ui.label(text(&p,"client"));
                                 ui.label(crate::i18n::t(bytes(num(&p,"downloaded"))));
                                 ui.label(crate::i18n::t(bytes(num(&p,"uploaded"))));
                                 ui.label(crate::i18n::t(format!("{}/s", bytes(num(&p,"recent_rate")))));
                                 ui.label(crate::i18n::t(text(&p,"transfer_status"))).on_hover_text(crate::i18n::t(format!("距开始观察或上次收数 {:.0} 秒",num(&p,"idle_seconds"))));
-                                ui.label(crate::i18n::t(text(&p,"state"))).on_hover_text(crate::i18n::t(format!("对端允许传输：{}；等待响应的数据块：{}",match p["download_choked"].as_bool(){Some(true)=>"否（choke）",Some(false)=>"是",None=>"未知"},p["pending_requests"].as_u64().map(|n|n.to_string()).unwrap_or("未知".into())))); ui.end_row();
+                                ui.label(crate::i18n::t(format!("{} {}",text(&p,"transport"),text(&p,"state")))).on_hover_text(crate::i18n::t(format!("对端允许传输：{}；等待响应的数据块：{}",match p["download_choked"].as_bool(){Some(true)=>"否（choke）",Some(false)=>"是",None=>"未知"},p["pending_requests"].as_u64().map(|n|n.to_string()).unwrap_or("未知".into())))); ui.end_row();
                             }
                         });
                     }
@@ -1738,7 +1757,9 @@ impl eframe::App for DownloadApp {
             let mut saved = false;
             egui::Window::new(crate::i18n::t("下载设置")).collapsible(false)
                 .open(&mut open)
-                .default_width(570.0)
+                .default_width(650.0)
+                .max_height((ctx.content_rect().height()-80.0).max(240.0))
+                .vscroll(true)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {ui.label(crate::i18n::t("语言 / Language"));crate::i18n::selector(ui,"settings-language");});
                     if ui.button(crate::i18n::t("Tracker 订阅设置")).clicked() { self.subscription_edit = serde_json::from_value(self.state["subscriptions"]["config"].clone()).ok(); }
@@ -1791,6 +1812,18 @@ impl eframe::App for DownloadApp {
                         ui.label(crate::i18n::t("连接上限（重启后生效）"));
                         ui.add(egui::DragValue::new(&mut config.peer_limit).range(10..=2000));
                     });
+                    ui.separator();
+                    ui.strong(crate::i18n::t("网络连接（重启后生效）"));
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut config.ipv6_enabled,crate::i18n::t("IPv4 / IPv6 双栈"));
+                        ui.checkbox(&mut config.tcp_enabled,"TCP");
+                        ui.checkbox(&mut config.utp_enabled,"uTP");
+                    });
+                    ui.horizontal(|ui| {ui.label(crate::i18n::t("监听端口（0 为自动）"));ui.add(egui::DragValue::new(&mut config.listen_port).range(0..=65535));});
+                    ui.checkbox(&mut config.upnp_enabled,crate::i18n::t("请求路由器 UPnP 端口映射（可选）"));
+                    ui.weak(crate::i18n::t("固定端口被占用时回退自动端口并提示；uTP 不等于 NAT 打洞，UPnP 不保证公网可达。"));
+                    crate::network::ui(ui,&self.state["network"]);
+                    if ui.button(crate::i18n::t("检查本机监听")).clicked() {let _=self.tx.send(Command::Post("/api/network-check",json!({})));}
                     if let Err(e) = config.validate() {
                         ui.colored_label(Color32::from_rgb(208, 89, 89), crate::i18n::t(e.to_string()));
                     }
@@ -1914,6 +1947,19 @@ fn main() -> eframe::Result {
         i18n::initialize(&root);
     }
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|s| s == "--diagnose-magnets") {
+        let result=(||->anyhow::Result<()> {
+            anyhow::ensure!(args.len()==3,"Usage: --diagnose-magnets input.json output.json");
+            tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(
+                network::probe(std::path::Path::new(&args[1]),std::path::Path::new(&args[2]))
+            )
+        })();
+        if let Err(error)=result {
+            if let Some(output)=args.get(2) {let _=std::fs::write(output,serde_json::to_vec_pretty(&json!({"error":format!("{error:#}")})).unwrap());}
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if args.first().is_some_and(|s| s == "--apply-update") {
         if let Err(error) = updater::apply_update(&args) {
             updater::report_helper_error(&format!("{error:#}"));

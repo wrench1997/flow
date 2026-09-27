@@ -48,6 +48,7 @@ mod bitv_factory;
 mod chunk_tracker;
 mod create_torrent_file;
 mod dht_utils;
+mod resolution_trace;
 mod error;
 pub mod file_info;
 mod file_ops;

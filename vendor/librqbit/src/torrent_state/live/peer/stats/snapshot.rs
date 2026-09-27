@@ -26,6 +26,7 @@ pub struct PeerCounters {
 #[derive(Serialize)]
 pub struct PeerStats {
     pub counters: PeerCounters,
+    pub last_error: Option<String>,
     pub state: &'static str,
     pub conn_kind: Option<ConnectionKind>,
     pub client_name: Option<String>,
@@ -61,6 +62,7 @@ impl From<&Peer> for PeerStats {
         let state = peer.get_state();
         Self {
             counters: peer.stats.counters.as_ref().into(),
+            last_error: peer.last_error.clone(),
             download_choked: peer.get_live().map(|live| live.download_choked),
             inflight_requests: peer.get_live().map(|live| live.requested_inflight_count()),
             state: state.name(),

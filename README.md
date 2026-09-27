@@ -36,6 +36,13 @@ Copies without the built-in updater need a manual upgrade first. Installation do
 
 ## Source recovery
 
+### Network settings and diagnostics
+
+- Settings offers IPv4/IPv6 dual stack and independently selectable TCP/uTP transports. Defaults enable both transports and IPv6 where available, using port 51413. If the fixed port cannot bind, Flow falls back to an automatic port and reports the reason. Network changes require fully exiting and restarting Flow; existing task data and preferences are retained.
+- Optional UPnP requests router port mappings. The Diagnostics tab shows the actual listener, enabled transports, connection attempts/errors and mapping-service failures. The local listener check tests loopback only: it does not prove internet reachability, successful router mapping or NAT hole punching.
+- Metadata discovery records observed peer addresses, DHT/Tracker/cache channels, BT handshakes, metadata bytes and concrete failures for the current session (up to 256 peers per hash). Metadata bytes are not downloaded file bytes. Peer details also expose transfer-connection errors. A responsive Tracker or a successful socket connection does not prove that anyone can supply the resource.
+- If metadata cannot be obtained, importing the matching `.torrent` bypasses that stage, but still requires reachable peers holding the selected pieces. More Trackers cannot recreate missing data. No BEP 55 hole punching, proprietary offline cache or cross-torrent file index is provided.
+
 - After two minutes without connections or download progress, restart the existing task’s discovery stream, with a ten-minute cooldown. Paused/completed tasks and tasks with live peers are left alone; verified pieces are preserved. Discovery uses the task’s existing Trackers and DHT where allowed, not a scrape-only query. Formerly useful disconnected peers remain cached and are labeled as past contributors. Recovery attempts are recorded in the diagnostic log; discovering a usable alternative is not guaranteed.
 
 ## Peer management and torrent import

@@ -13,6 +13,7 @@ use tracing::info;
 use crate::{stream_connect::ConnectionKind, vectored_traits::AsyncReadVectored};
 
 pub(crate) struct ListenResult {
+    pub warnings: Vec<String>,
     pub tcp_socket: Option<TcpListener>,
     pub utp_socket: Option<Arc<UtpSocketUdp>>,
     pub enable_upnp_port_forwarding: bool,
@@ -50,6 +51,8 @@ impl ListenerMode {
 
 #[derive(Debug, Clone)]
 pub struct ListenerOptions {
+    /// Fall back to a random port if a requested fixed port cannot be bound.
+    pub allow_port_fallback: bool,
     pub mode: ListenerMode,
     pub listen_addr: SocketAddr,
     pub enable_upnp_port_forwarding: bool,
@@ -63,6 +66,7 @@ impl Default for ListenerOptions {
     fn default() -> Self {
         Self {
             // TODO: once uTP is stable upgrade default to both
+            allow_port_fallback: false,
             mode: ListenerMode::TcpOnly,
             listen_addr: (Ipv6Addr::UNSPECIFIED, 0).into(),
             enable_upnp_port_forwarding: false,
@@ -97,8 +101,9 @@ impl ListenerOptions {
             self.listen_addr
         };
 
+        let mut warnings = Vec::new();
         let tcp_socket = if self.mode.tcp_enabled() {
-            let listener = TcpListener::bind_tcp(
+            let result = TcpListener::bind_tcp(
                 listen_addr,
                 BindOpts {
                     request_dualstack: !self.ipv4_only,
@@ -106,7 +111,18 @@ impl ListenerOptions {
                     device: bind_device,
                 },
             )
-            .context("error starting TCP listener")?;
+            ;
+            let listener = match result {
+                Ok(listener) => listener,
+                Err(error) if self.allow_port_fallback && listen_addr.port() != 0 => {
+                    warnings.push(format!("Fixed TCP port {} unavailable: {error}; using an automatic port", listen_addr.port()));
+                    listen_addr.set_port(0);
+                    TcpListener::bind_tcp(listen_addr, BindOpts {
+                        request_dualstack: !self.ipv4_only, reuseport: false, device: bind_device,
+                    }).context("error starting fallback TCP listener")?
+                }
+                Err(error) => return Err(error.into()),
+            };
             listen_addr = listener.bind_addr();
             info!(
                 "Listening on TCP {:?} for incoming peer connections",
@@ -120,7 +136,7 @@ impl ListenerOptions {
         let utp_socket = if self.mode.utp_enabled() {
             let bind_result = UtpSocketUdp::new_udp_with_opts(
                 listen_addr,
-                utp_opts,
+                utp_opts.clone(),
                 UtpSocketUdpOpts { bind_device },
             )
             .await;
@@ -136,11 +152,17 @@ impl ListenerOptions {
                 Err(e) if tcp_socket.is_some() => {
                     // If we listen over TCP, it's not a fatal error if we can't listen over uTP.
                     tracing::error!("Error listening on UDP {listen_addr:?}: {e:#}");
+                    warnings.push(format!("uTP UDP listener unavailable: {e:#}; TCP remains enabled"));
                     None
                 }
-                Err(e) => {
-                    return Err(e.into());
+                Err(e) if self.allow_port_fallback && listen_addr.port() != 0 => {
+                    warnings.push(format!("Fixed UDP port {} unavailable: {e}; using an automatic port",listen_addr.port()));
+                    listen_addr.set_port(0);
+                    let sock=UtpSocketUdp::new_udp_with_opts(listen_addr,utp_opts,UtpSocketUdpOpts{bind_device}).await?;
+                    listen_addr=sock.bind_addr();
+                    Some(sock)
                 }
+                Err(e) => return Err(e.into()),
             }
         } else {
             None
@@ -154,6 +176,7 @@ impl ListenerOptions {
             Some(listen_addr.port())
         };
         Ok(ListenResult {
+            warnings,
             tcp_socket,
             utp_socket,
             announce_port,

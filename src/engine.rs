@@ -62,6 +62,9 @@ pub struct Engine {
     peer_records: Mutex<BTreeMap<String, Value>>,
     active_bans: std::collections::BTreeSet<String>,
     recovery: Mutex<BTreeMap<String, crate::peer_quality::Recovery>>,
+    network_configuration: Value,
+    network_warnings: Vec<String>,
+    connectivity_check: Mutex<Value>,
     pub offline: bool,
 }
 
@@ -209,6 +212,8 @@ impl Engine {
                 atomic(&session_file, br#"{"torrents":{}}"#)?;
             }
         }
+        let (listener, ipv4_only, network_warnings) = crate::network::listener(&settings, offline);
+        let network_configuration = crate::network::configuration(&settings);
         let mut opts = SessionOptions {
             fastresume: true,
             persistence: Some(SessionPersistenceConfig::Json {
@@ -216,12 +221,9 @@ impl Engine {
             }),
             disable_local_service_discovery: true,
             peer_limit: Some(settings.peer_limit as usize),
-            ipv4_only: true,
-            listen: Some(librqbit::ListenerOptions {
-                ipv4_only: true,
-                ..Default::default()
-            }),
-            connect: Some(librqbit::ConnectionOptions::default()),
+            ipv4_only,
+            listen: Some(listener),
+            connect: Some(librqbit::ConnectionOptions {enable_tcp: settings.tcp_enabled, ..Default::default()}),
             ratelimits: librqbit::limits::LimitsConfig {
                 upload_bps: std::num::NonZeroU32::new(settings.upload_kib * 1024),
                 download_bps: std::num::NonZeroU32::new(settings.download_kib * 1024),
@@ -235,9 +237,6 @@ impl Engine {
             let persistence = dht.persistence.get_or_insert_with(Default::default);
             persistence.config_filename = Some(data.join("dht.json"));
             persistence.dump_interval = Some(Duration::from_secs(30));
-        }
-        if let Some(listener) = opts.listen.as_mut() {
-            listener.ipv4_only = true;
         }
         let records_path = data.join("peer-records.json");
         let peer_records: BTreeMap<String, Value> = if records_path.exists() {
@@ -289,6 +288,9 @@ impl Engine {
             peer_records: Mutex::new(peer_records),
             active_bans,
             recovery: Mutex::new(BTreeMap::new()),
+            network_configuration,
+            network_warnings,
+            connectivity_check: Mutex::new(json!({})),
             offline,
         });
         engine.persist()?;
@@ -1523,7 +1525,7 @@ impl Engine {
         let mut tasks = Vec::new();
         let mut detail = json!({"files":[],"peers":[],"trackers":[],"discovery":self.discovery.lock().unwrap().get(selected).cloned().unwrap_or(json!({}))});
         for e in entries {
-            let mut item = json!({"id":e.id,"name":e.source,"save_path":e.save_path,"paused":e.paused,"error":e.error,"progress":0,"download_rate":0,"upload_rate":0,"done":0,"total":0,"peers":0,"seeds":null,"availability":-1,"state":"loading","diagnosis":if e.error.is_empty(){"正在解析元数据或载入任务"}else{&e.error}});
+            let mut item = json!({"id":e.id,"name":e.source,"save_path":e.save_path,"paused":e.paused,"error":e.error,"progress":0,"download_rate":0,"upload_rate":0,"done":0,"total":0,"peers":0,"seeds":null,"availability":-1,"state":if !e.error.is_empty(){"error"}else if e.paused{"paused"}else{"loading"},"diagnosis":if e.error.is_empty(){"正在解析元数据或载入任务"}else{&e.error}});
             if let Some(bridge) = self.webseeds.lock().unwrap().get(&e.id) {
                 item["webseeds"] = bridge.snapshot();
             }
@@ -1593,6 +1595,17 @@ impl Engine {
             }
             if e.source.starts_with("magnet:") {
                 item["magnet"] = json!(e.source);
+                if let Ok(magnet)=librqbit::Magnet::parse(&e.source) {
+                    if let Some(hash)=magnet.as_id20() {
+                        let trace=self.session.resolution_diagnostics(hash);
+                        if trace.is_object() {
+                            item["resolution"] = trace;
+                            if self.loading.lock().unwrap().get(&e.id).is_some_and(|load| load["files"].is_null()) {
+                                item["diagnosis"] = json!(format!("{}；已观察 {} 个节点，尝试 {} 次，握手 {} 次，失败 {} 次，收到元数据 {} 字节",crate::network::metadata_stage(&item["resolution"]),item["resolution"]["observed_peers"],item["resolution"]["attempts"],item["resolution"]["handshakes"],item["resolution"]["errors"],item["resolution"]["metadata_bytes"]));
+                            }
+                        }
+                    }
+                }
             }
             item["name"] = json!(
                 url::Url::parse(&e.source)
@@ -1741,7 +1754,7 @@ impl Engine {
                             if q.rank == 0 {
                                 stable_peers += 1;
                             }
-                            peer_rows.push(json!({"address":addr,"client":peer.client_name.clone().unwrap_or_default(),"download_choked":peer.download_choked,"pending_requests":peer.inflight_requests,"downloaded":peer.counters.fetched_bytes,"uploaded":peer.counters.uploaded_bytes,"errors":peer.counters.errors,"state":peer.state,"transfer_rank":q.rank,"recent_rate":q.rate,"idle_seconds":q.idle,"transfer_status":if peer.state == "dead" && peer.counters.fetched_bytes > 0 { "已断开 · 曾有效传输" } else { q.label }}));
+                            peer_rows.push(json!({"address":addr,"client":peer.client_name.clone().unwrap_or_default(),"download_choked":peer.download_choked,"pending_requests":peer.inflight_requests,"downloaded":peer.counters.fetched_bytes,"uploaded":peer.counters.uploaded_bytes,"errors":peer.counters.errors,"error":peer.last_error,"transport":peer.conn_kind,"state":peer.state,"transfer_rank":q.rank,"recent_rate":q.rate,"idle_seconds":q.idle,"transfer_status":if peer.state == "dead" && peer.counters.fetched_bytes > 0 { "已断开 · 曾有效传输" } else { q.label }}));
                         }
                     }
                 }
@@ -1939,7 +1952,12 @@ impl Engine {
                 row
             })
             .collect();
-        json!({"peer_records":records,"tasks":tasks,"detail":detail,"settings":*self.settings.lock().unwrap(),"subscriptions":self.subscriptions.snapshot(),"events":*self.events.lock().unwrap(),"engine":"librqbit 9.0.1 · Rust","listen_port":self.session.announce_port().unwrap_or(0),"updated_at":trackers::now(),"discovery":*self.discovery.lock().unwrap()})
+        let mut network=self.session.network_diagnostics();
+        network["startup_warnings"]=json!(self.network_warnings);
+        network["configuration"]=self.network_configuration.clone();
+        network["restart_required"]=json!(self.network_configuration != crate::network::configuration(&self.settings.lock().unwrap()));
+        network["local_check"]=self.connectivity_check.lock().unwrap().clone();
+        json!({"network":network,"peer_records":records,"tasks":tasks,"detail":detail,"settings":*self.settings.lock().unwrap(),"subscriptions":self.subscriptions.snapshot(),"events":*self.events.lock().unwrap(),"engine":"librqbit 9.0.1 · Rust","listen_port":self.session.announce_port().unwrap_or(0),"updated_at":trackers::now(),"discovery":*self.discovery.lock().unwrap()})
     }
 }
 
@@ -2157,6 +2175,12 @@ async fn subscriptions(
     reply(Ok(json!({"ok":true,"message":"Tracker 订阅已保存，正在加载候选；不会自动重载下载任务。"})))
 }
 
+async fn network_check(State(s): State<ApiState>) -> Response {
+    let result=crate::network::check_local(&s.engine.session).await;
+    *s.engine.connectivity_check.lock().unwrap()=result;
+    reply(Ok(json!({"ok":true,"message":"本机监听检查完成；不代表公网入站可达。请查看网络诊断。"})))
+}
+
 async fn select_files(State(s): State<ApiState>, Json(v): Json<Value>) -> Response {
     let result = async {
         let indices: Vec<usize> =
@@ -2190,8 +2214,9 @@ async fn settings(
             .session
             .ratelimits
             .set_download_bps(std::num::NonZeroU32::new(config.download_kib * 1024));
+        let restart_required=s.engine.network_configuration != crate::network::configuration(&config);
         *s.engine.settings.lock().unwrap() = config;
-        Ok(json!({"ok":true}))
+        Ok(json!({"ok":true,"message":if restart_required {"设置已保存；网络协议、端口和连接上限在完全退出并重启 Flow 后生效。"} else {"设置已保存"}}))
     })();
     reply(result)
 }
@@ -2240,6 +2265,7 @@ pub async fn serve(
         .route("/api/tasks", post(add))
         .route("/api/action", post(action))
         .route("/api/subscriptions", post(subscriptions))
+        .route("/api/network-check", post(network_check))
         .route("/api/peer-policy", post(peer_policy))
         .route("/api/settings", post(settings))
         .route("/api/files", post(select_files))
@@ -2848,4 +2874,53 @@ mod tests {
         let bytes = b"d4:infod5:filesle4:name2:..ee";
         assert!(output_path(bytes, Path::new("D:/downloads")).is_err());
     }
+    async fn transport_fixture(ipv6: bool, utp_only: bool) {
+        let temp=tempfile::tempdir().unwrap();
+        let seed_root=temp.path().join("seed");
+        let client_root=temp.path().join("client");
+        for root in [&seed_root,&client_root] {
+            std::fs::create_dir_all(root.join("data")).unwrap();
+            let mut config=crate::settings::Settings::defaults(root);
+            config.ipv6_enabled=ipv6;
+            config.tcp_enabled=!utp_only;
+            config.utp_enabled=utp_only;
+            std::fs::write(root.join("data/settings.json"),serde_json::to_vec(&config).unwrap()).unwrap();
+        }
+        let bytes=(0..1024*1024usize).map(|i|(i%251) as u8).collect::<Vec<_>>();
+        let source=seed_root.join("payload.bin");
+        std::fs::write(&source,&bytes).unwrap();
+        let seed=Engine::new(&seed_root,true).await.unwrap();
+        let (_,handle)=seed.session.create_and_serve_torrent(&source,librqbit::CreateTorrentOptions{
+            piece_length:Some(16384),..Default::default()
+        }).await.unwrap();
+        handle.wait_until_initialized().await.unwrap();
+        let port=seed.session.listen_addr().unwrap().port();
+        let address:std::net::SocketAddr=if ipv6 {([0,0,0,0,0,0,0,1],port).into()}else{([127,0,0,1],port).into()};
+        let client=Engine::new(&client_root,true).await.unwrap();
+        assert_eq!(client.session.network_diagnostics()["utp_enabled"],utp_only);
+        if ipv6 {assert!(!client.session.ipv4_only);}
+        client.entries.lock().unwrap().push(Entry{
+            id:"transport".into(),source:format!("magnet:?xt=urn:btih:{}",handle.info_hash().as_string()),
+            initial_peers:vec![address],save_path:client_root.join("downloads").display().to_string(),..Default::default()
+        });
+        tokio::time::timeout(Duration::from_secs(30),client.load("transport")).await.unwrap().unwrap();
+        let downloaded=client.handle("transport").unwrap();
+        downloaded.wait_until_initialized().await.unwrap();
+        wait("verified transport fixture",||downloaded.stats().finished).await;
+        assert_eq!(std::fs::read(client_root.join("downloads/payload.bin")).unwrap(),bytes);
+        let trace=client.session.resolution_diagnostics(handle.info_hash());
+        assert!(trace["completed"].as_u64().unwrap()>0);
+        assert!(trace["handshakes"].as_u64().unwrap()>0);
+        assert!(trace["metadata_bytes"].as_u64().unwrap()>0);
+        assert_eq!(trace["peers"][0]["transport"],if utp_only {"uTP"} else {"tcp"});
+        if utp_only {assert_eq!(client.session.network_diagnostics()["connections"]["tcp"]["v4"]["attempts"],0);}
+        client.session.stop().await;seed.session.stop().await;
+    }
+    #[tokio::test(flavor="multi_thread",worker_threads=4)]
+    async fn ipv6_tcp_magnet_metadata_and_verified_file_transfer() {transport_fixture(true,false).await;}
+    #[tokio::test(flavor="multi_thread",worker_threads=4)]
+    async fn ipv4_utp_only_magnet_metadata_and_verified_file_transfer() {transport_fixture(false,true).await;}
+    #[tokio::test(flavor="multi_thread",worker_threads=4)]
+    async fn ipv6_utp_only_magnet_metadata_and_verified_file_transfer() {transport_fixture(true,true).await;}
+
 }

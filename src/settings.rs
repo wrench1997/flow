@@ -12,6 +12,16 @@ pub struct Settings {
     pub download_kib: u32,
     pub upload_kib: u32,
     pub peer_limit: u16,
+    #[serde(default = "background_default")]
+    pub ipv6_enabled: bool,
+    #[serde(default = "background_default")]
+    pub tcp_enabled: bool,
+    #[serde(default = "background_default")]
+    pub utp_enabled: bool,
+    #[serde(default = "default_listen_port")]
+    pub listen_port: u16,
+    #[serde(default)]
+    pub upnp_enabled: bool,
 }
 impl Settings {
     pub fn defaults(root: &std::path::Path) -> Self {
@@ -23,6 +33,11 @@ impl Settings {
             download_kib: 0,
             upload_kib: 512,
             peer_limit: 150,
+            ipv6_enabled: true,
+            tcp_enabled: true,
+            utp_enabled: true,
+            listen_port: default_listen_port(),
+            upnp_enabled: false,
         }
     }
     pub fn validate(&self) -> Result<()> {
@@ -30,6 +45,7 @@ impl Settings {
             std::path::Path::new(&self.download_dir).is_absolute(),
             "下载目录必须是绝对路径"
         );
+        anyhow::ensure!(self.tcp_enabled || self.utp_enabled, "至少启用 TCP 或 uTP");
         anyhow::ensure!((10..=2000).contains(&self.peer_limit), "连接数应为 10–2000");
         anyhow::ensure!(
             self.download_kib <= 4_000_000 && self.upload_kib <= 4_000_000,
@@ -38,6 +54,7 @@ impl Settings {
         Ok(())
     }
 }
+fn default_listen_port() -> u16 { 51413 }
 fn background_default() -> bool {
     true
 }
@@ -58,4 +75,17 @@ mod tests {
                 .seed_after_download
         );
     }
+    #[test]
+    fn old_settings_enable_dualstack_transports_without_losing_preferences() {
+        let mut value=serde_json::to_value(Settings::defaults(&std::env::temp_dir())).unwrap();
+        for key in ["ipv6_enabled","tcp_enabled","utp_enabled","listen_port","upnp_enabled"] {value.as_object_mut().unwrap().remove(key);}
+        value["clipboard_watch"]=serde_json::json!(false);
+        let mut settings:Settings=serde_json::from_value(value).unwrap();
+        assert!(settings.ipv6_enabled && settings.tcp_enabled && settings.utp_enabled);
+        assert_eq!(settings.listen_port,51413);
+        assert!(!settings.upnp_enabled && !settings.clipboard_watch);
+        settings.tcp_enabled=false;settings.utp_enabled=false;
+        assert!(settings.validate().is_err());
+    }
+
 }

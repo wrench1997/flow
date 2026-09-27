@@ -1376,6 +1376,7 @@ impl PeerHandler {
             }
         };
 
+        pe.value_mut().last_error=Some(format!("{_error:#}").chars().take(1500).collect());
         self.counters.errors.fetch_add(1, Ordering::Relaxed);
 
         if self.state.is_finished_and_no_active_streams() {

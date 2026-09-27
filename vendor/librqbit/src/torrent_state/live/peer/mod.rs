@@ -27,6 +27,7 @@ pub(crate) type PeerTx = UnboundedSender<WriterRequest>;
 #[derive(Debug)]
 pub(crate) struct Peer {
     pub addr: SocketAddr,
+    pub last_error: Option<String>,
     state: PeerState,
     pub stats: stats::atomic::PeerStats,
     pub outgoing_address: Option<SocketAddr>,
@@ -46,7 +47,7 @@ impl Peer {
         }
         Self {
             addr,
-            state,
+            last_error: None,            state,
             stats: Default::default(),
             outgoing_address: None,
         }
@@ -55,7 +56,7 @@ impl Peer {
     pub fn new_with_outgoing_address(addr: SocketAddr) -> Self {
         Self {
             addr,
-            outgoing_address: Some(addr),
+            last_error: None,            outgoing_address: Some(addr),
             stats: Default::default(),
             state: Default::default(),
         }
@@ -212,6 +213,7 @@ impl Peer {
         }
         match self.take_state(counters) {
             PeerState::Queued | PeerState::Dead | PeerState::NotNeeded => {
+                self.last_error = None;
                 self.set_state(
                     PeerState::Live(LivePeerState::new(peer_id, tx, true, connection_kind)),
                     counters,
@@ -233,6 +235,7 @@ impl Peer {
                 PeerState::Connecting(tx) => tx,
                 _ => unreachable!(),
             };
+            self.last_error=None;
             self.set_state(
                 PeerState::Live(LivePeerState::new(peer_id, tx, false, conn_kind)),
                 counters,

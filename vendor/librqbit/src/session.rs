@@ -113,6 +113,9 @@ pub struct Session {
 
     // Network
     peer_id: Id20,
+    network_status: serde_json::Value,
+    upnp_status: parking_lot::Mutex<serde_json::Value>,
+    resolution_traces: parking_lot::Mutex<std::collections::HashMap<Id20, Arc<crate::resolution_trace::Trace>>>,
     announce_port: Option<u16>,
     listen_addr: Option<SocketAddr>,
     dht: Option<Dht>,
@@ -781,6 +784,16 @@ impl Session {
                 persistence,
                 bitv_factory,
                 peer_id,
+                network_status: serde_json::json!({
+                    "tcp_enabled":listen_result.as_ref().is_some_and(|l|l.tcp_socket.is_some()),
+                    "utp_enabled":listen_result.as_ref().is_some_and(|l|l.utp_socket.is_some()),
+                    "listen_addr":listen_result.as_ref().map(|l|l.addr.to_string()),
+                    "warnings":listen_result.as_ref().map(|l|l.warnings.clone()).unwrap_or_default(),
+                    "upnp_requested":listen_result.as_ref().is_some_and(|l|l.enable_upnp_port_forwarding),
+                    "public_reachability":"unverified",
+                }),
+                upnp_status: parking_lot::Mutex::new(serde_json::json!({"state":if listen_result.as_ref().is_some_and(|l|l.enable_upnp_port_forwarding){"requesting"}else{"disabled"}})),
+                resolution_traces: Default::default(),
                 dht,
                 peer_opts,
                 spawner: spawner.clone(),
@@ -850,10 +863,15 @@ impl Session {
                 {
                     info!(port = announce_port, "starting UPnP port forwarder");
                     let bind_device = bind_device.clone();
+                    let observed_session=session.clone();
                     session.spawn(
                         debug_span!(parent: session.rs(), "upnp_forward", port = announce_port),
                         "upnp_forward",
-                        Self::task_upnp_port_forwarder(announce_port, bind_device),
+                        async move {
+                            let result=Self::task_upnp_port_forwarder(announce_port, bind_device).await;
+                            *observed_session.upnp_status.lock()=serde_json::json!({"state":if result.is_err(){"failed"}else{"ended"},"error":result.as_ref().err().map(|e|format!("{e:#}"))});
+                            result
+                        },
                     );
                 }
             }
@@ -1579,10 +1597,16 @@ impl Session {
             self.udp_tracker_client.clone(),
         );
 
+        let trace = self.resolution_trace(info_hash);
+        let dht_trace = trace.clone();
+        let dht_rx = dht_rx.map(|rx| rx.inspect(move |addr| dht_trace.discovered(*addr, "DHT")).boxed());
+        let tracker_trace = trace.clone();
+        let tracker_rx = tracker_rx.map(|rx| rx.inspect(move |addr| tracker_trace.discovered(*addr, "Tracker")).boxed());
+        let cache_trace = trace.clone();
         let initial_peers_rx = if initial_peers.is_empty() {
             None
         } else {
-            Some(futures::stream::iter(initial_peers))
+            Some(futures::stream::iter(initial_peers).inspect(move |addr|cache_trace.discovered(*addr, "Cache")))
         };
         merge_two_optional_streams(
             merge_two_optional_streams(
@@ -1624,6 +1648,27 @@ impl Session {
         Ok(())
     }
 
+    pub fn network_diagnostics(&self) -> serde_json::Value {
+        let mut status = self.network_status.clone();
+        status["upnp"] = self.upnp_status.lock().clone();
+        status["ipv4_only"] = serde_json::json!(self.ipv4_only);
+        status["dht_enabled"] = serde_json::json!(self.dht.is_some());
+        status["connections"] = serde_json::to_value(self.connector.stats().snapshot()).unwrap_or_default();
+        status
+    }
+
+    fn resolution_trace(&self, hash: Id20) -> Arc<crate::resolution_trace::Trace> {
+        let mut traces = self.resolution_traces.lock();
+        if !traces.contains_key(&hash) && traces.len() >= 256 {
+            if let Some(old) = traces.keys().next().copied() { traces.remove(&old); }
+        }
+        traces.entry(hash).or_default().clone()
+    }
+
+    pub fn resolution_diagnostics(&self, hash: Id20) -> serde_json::Value {
+        self.resolution_traces.lock().get(&hash).map(|trace|trace.snapshot()).unwrap_or_default()
+    }
+
     pub fn listen_addr(&self) -> Option<SocketAddr> {
         self.listen_addr
     }
@@ -1647,6 +1692,7 @@ impl Session {
             Some(self.merge_peer_opts(peer_opts)),
             self.connector.clone(),
             self.client_name_and_version.clone(),
+            Some(self.resolution_trace(info_hash)),
         )
         .await
         {

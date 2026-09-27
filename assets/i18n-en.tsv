@@ -429,3 +429,53 @@ Tracker 用于发现节点；文件数据来自对等连接。已载入不代表
 Tracker 订阅已保存，正在加载候选；不会自动重载下载任务。|Tracker subscriptions saved. Loading candidates without reloading downloads.
 Tracker 候选已提交引擎，正在重新载入和校验；连接状态请查看任务。|Tracker candidates submitted. Reloading and checking files; see the task for connection status.
 Tracker 查询已开始，结果将在 Tracker 页面更新。|Tracker query started. Results will appear on the Tracker page.
+至少启用 TCP 或 uTP|Enable at least one of TCP or uTP
+本机 IPv6 不可用，已回退 IPv4|IPv6 is unavailable locally; using IPv4
+没有监听端口|No listening port
+本机连接超时|Local connection timed out
+元数据已验证|Metadata verified
+正在接收元数据|Receiving metadata
+握手已完成，等待元数据|Handshake completed; waiting for metadata
+已发现节点，正在尝试连接和握手|Peers discovered; attempting connections and handshakes
+尚未发现可尝试的节点|No candidate peers observed yet
+网络与找源诊断|Network and source diagnostics
+已尝试的节点未提供元数据，继续寻找来源|Attempted peers supplied no metadata; searching for more sources
+网络设置已修改，完全退出并重启后生效|Network settings changed; fully exit and restart to apply
+实际监听地址|Actual listening address
+地址族|Address family
+仅 IPv4|IPv4 only
+IPv4 / IPv6 双栈|IPv4 / IPv6 dual stack
+实际传输协议|Active transports
+UPnP 端口映射|UPnP port mapping
+映射服务失败|Port mapping service failed
+映射服务已结束|Port mapping service ended
+正在请求映射，结果尚未验证|Requesting mapping; result not verified
+公网入站可达性|Public inbound reachability
+未验证；监听成功不代表公网可达|Unverified; listening does not prove public reachability
+本机监听检查|Local listener checks
+会话传输连接统计：连接成功不等于 BT 握手成功，不等于已传输文件。|Session transport statistics: a connection does not prove a BT handshake or file delivery.
+协议 / 地址族|Transport / address family
+连接尝试|Connection attempts
+连接建立|Connections established
+连接错误|Connection errors
+检查本机监听|Check local listeners
+元数据找源记录（本次会话）|Metadata source observations (this session)
+元数据字节不是文件下载量；仅记录已观察到的节点，最多 256 个。|Metadata bytes are not downloaded file bytes. Up to 256 observed peers are recorded.
+发现渠道|Discovery channel
+解析阶段|Resolution stage
+协议|Transport
+错误原因|Error reason
+已发现|Discovered
+连接中|Connecting
+握手中|Handshaking
+等待元数据|Waiting for metadata
+接收元数据|Receiving metadata
+本次尝试已停止|Attempt stopped
+Cache|Cached peers
+网络连接（重启后生效）|Network connections (restart required)
+监听端口（0 为自动）|Listening port (0 = automatic)
+请求路由器 UPnP 端口映射（可选）|Request router UPnP port mapping (optional)
+固定端口被占用时回退自动端口并提示；uTP 不等于 NAT 打洞，UPnP 不保证公网可达。|An unavailable fixed port falls back with a warning. uTP is not NAT hole punching; UPnP does not guarantee public reachability.
+设置已保存；网络协议、端口和连接上限在完全退出并重启 Flow 后生效。|Settings saved. Network transports, port and peer limit apply after fully exiting and restarting Flow.
+本机监听检查完成；不代表公网入站可达。请查看网络诊断。|Local listener checks completed; public inbound reachability is unverified. See network diagnostics.
+{}；已观察 {} 个节点，尝试 {} 次，握手 {} 次，失败 {} 次，收到元数据 {} 字节|{}; {} peers observed, {} attempts, {} handshakes, {} failures, {} metadata bytes received

@@ -38,6 +38,7 @@ pub(crate) async fn read_metainfo_from_peer(
     spawner: BlockingSpawner,
     connector: Arc<StreamConnector>,
     client_name_and_version: String,
+    trace: Option<Arc<crate::resolution_trace::Trace>>,
 ) -> anyhow::Result<TorrentAndInfoBytes> {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel::<
         Result<(TorrentMetaV1Info<ByteBufOwned>, ByteBufOwned), bencode::DeserializeError>,
@@ -45,6 +46,7 @@ pub(crate) async fn read_metainfo_from_peer(
     let (writer_tx, writer_rx) = tokio::sync::mpsc::unbounded_channel::<WriterRequest>();
     let handler = Handler {
         addr,
+        trace,
         info_hash,
         writer_tx,
         result_tx: Mutex::new(Some(result_tx)),
@@ -150,6 +152,7 @@ impl HandlerLocked {
 pub type TorrentAndInfoBytes = (TorrentMetaV1Info<ByteBufOwned>, ByteBufOwned);
 
 struct Handler {
+    trace: Option<Arc<crate::resolution_trace::Trace>>,
     addr: SocketAddr,
     info_hash: Id20,
     writer_tx: UnboundedSender<WriterRequest>,
@@ -163,6 +166,9 @@ struct Handler {
 }
 
 impl PeerConnectionHandler for Handler {
+    fn on_connected(&self, _time: std::time::Duration) {
+        if let Some(trace)=&self.trace {trace.connected(self.addr);}
+    }
     fn should_send_bitfield(&self) -> bool {
         false
     }
@@ -171,7 +177,8 @@ impl PeerConnectionHandler for Handler {
         Ok(0)
     }
 
-    fn on_handshake(&self, handshake: Handshake, _kind: ConnectionKind) -> anyhow::Result<()> {
+    fn on_handshake(&self, handshake: Handshake, kind: ConnectionKind) -> anyhow::Result<()> {
+        if let Some(trace)=&self.trace {trace.handshake(self.addr,&kind.to_string());}
         if !handshake.supports_extended() {
             anyhow::bail!(
                 "this peer does not support extended handshaking, which is a prerequisite to download metadata"
@@ -184,6 +191,7 @@ impl PeerConnectionHandler for Handler {
         trace!("{}: received message: {:?}", self.addr, msg);
 
         if let Message::Extended(ExtendedMessage::UtMetadata(UtMetadata::Data(utdata))) = msg {
+            if let Some(trace)=&self.trace {trace.received(self.addr,utdata.len());}
             let piece_ready = self
                 .locked
                 .write()
