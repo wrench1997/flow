@@ -36,13 +36,27 @@ fn run_shortcuts(
     remove: bool,
     test_directory: Option<&Path>,
 ) -> Result<()> {
-    let script = r#"$ErrorActionPreference='Stop'; $root=$env:FLOW_INSTALL_ROOT; $shell=New-Object -ComObject WScript.Shell; $paths=@((Join-Path ([Environment]::GetFolderPath('Programs')) 'Flow.lnk')); if($env:FLOW_INSTALL_DESKTOP -eq '1'){$paths+=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Flow.lnk'}; foreach($path in $paths){if($env:FLOW_INSTALL_REMOVE -eq '1'){if(Test-Path -LiteralPath $path){$link=$shell.CreateShortcut($path);if($link.TargetPath -eq (Join-Path $root 'Flow.exe')){Remove-Item -LiteralPath $path}}}else{$link=$shell.CreateShortcut($path);$link.TargetPath=Join-Path $root 'Flow.exe';$link.WorkingDirectory=$root;$link.IconLocation=(Join-Path $root 'Flow.exe')+',0';$link.Save()}}"#;
+    let script = r#"
+$ErrorActionPreference='Stop'; $root=$env:FLOW_INSTALL_ROOT;
+$shell=New-Object -ComObject WScript.Shell;
+$programs=[Environment]::GetFolderPath('Programs');
+if($env:FLOW_SHORTCUT_TEST_DIR){$programs=$env:FLOW_SHORTCUT_TEST_DIR}
+$entries=@(@{Path=[IO.Path]::Combine($programs,'Flow.lnk');Exe='Flow.exe'},@{Path=[IO.Path]::Combine($programs,'Uninstall Flow.lnk');Exe='Flow-Uninstall.exe'});
+if($env:FLOW_INSTALL_DESKTOP -eq '1' -and !$env:FLOW_SHORTCUT_TEST_DIR){$entries+=@{Path=[IO.Path]::Combine([Environment]::GetFolderPath('Desktop'),'Flow.lnk');Exe='Flow.exe'}}
+foreach($entry in $entries){
+ $path=$entry.Path; $target=[IO.Path]::Combine($root,$entry.Exe);
+ if($env:FLOW_INSTALL_REMOVE -eq '1'){
+  if(Test-Path -LiteralPath $path){$link=$shell.CreateShortcut($path);if($link.TargetPath -eq $target){Remove-Item -LiteralPath $path}}
+ }else{
+  $link=$shell.CreateShortcut($path);$link.TargetPath=$target;$link.WorkingDirectory=$root;$link.IconLocation=[IO.Path]::Combine($root,'Flow.exe')+',0';$link.Save()
+ }
+}
+"#;
     // Canonical Windows paths use \\?\, which PowerShell 5 providers and Shell links do not accept.
     let root = dunce::simplified(root);
     let script = format!(
         "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding; try {{ {script} }} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"
     );
-    let script = script.replace("foreach($path in $paths)", "if($env:FLOW_SHORTCUT_TEST_DIR){$paths=@([IO.Path]::Combine($env:FLOW_SHORTCUT_TEST_DIR,'Flow.lnk'))}; foreach($path in $paths)");
     let exe = PathBuf::from(std::env::var_os("SystemRoot").context("Windows 目录不可用")?)
         .join("System32/WindowsPowerShell/v1.0/powershell.exe");
     let mut cmd = Command::new(exe);
@@ -83,6 +97,7 @@ fn place_payload(source: &Path, root: &Path) -> Result<()> {
         return Err(error.into());
     }
 
+    std::fs::copy(&target, root.join("Flow-Uninstall.exe")).context("创建卸载程序失败")?;
     Ok(())
 }
 fn install(source: &Path, root: &Path, desktop: bool) -> Result<()> {
@@ -105,7 +120,10 @@ fn install(source: &Path, root: &Path, desktop: bool) -> Result<()> {
             &serde_json::json!({"product":"Flow","version":env!("CARGO_PKG_VERSION")}),
         )?,
     )?;
-    let uninstall = format!("\"{}\" --uninstall", target.display());
+    let uninstall = format!(
+        "\"{}\" --uninstall",
+        root.join("Flow-Uninstall.exe").display()
+    );
     let root_text = root.display().to_string();
     let exe_text = target.display().to_string();
     for (name, value) in [
@@ -140,10 +158,25 @@ pub fn requested(args: &[String]) -> bool {
     }) || std::env::current_exe()
         .ok()
         .and_then(|p| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().starts_with("Flow-Setup-"))
+            p.file_name().map(|n| {
+                n.to_string_lossy().starts_with("Flow-Setup-")
+                    || uninstaller_name(&n.to_string_lossy())
+            })
         })
         .unwrap_or(false)
+}
+fn uninstaller_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Flow-Uninstall.exe")
+}
+fn remove_program_files(root: &Path) -> Result<()> {
+    for name in ["Flow.exe", "Flow-Uninstall.exe", "flow-install.json"] {
+        match std::fs::remove_file(root.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 struct Installer {
     directory: String,
@@ -286,8 +319,7 @@ pub fn run(args: Vec<String>) -> eframe::Result {
                 .write(true)
                 .open(root.join("data/engine.lock"))?;
             fs2::FileExt::try_lock_exclusive(&lock).context("Flow 正在运行")?;
-            std::fs::remove_file(root.join("Flow.exe"))?;
-            std::fs::remove_file(root.join("flow-install.json"))?;
+            remove_program_files(&root)?;
             Ok(())
         })();
         if let Err(e) = result {
@@ -296,7 +328,14 @@ pub fn run(args: Vec<String>) -> eframe::Result {
         }
         return Ok(());
     }
-    let uninstall = args.first().is_some_and(|s| s == "--uninstall");
+    let uninstall = args.first().is_some_and(|s| s == "--uninstall")
+        || std::env::current_exe()
+            .ok()
+            .and_then(|p| {
+                p.file_name()
+                    .map(|n| uninstaller_name(&n.to_string_lossy()))
+            })
+            .unwrap_or(false);
     let directory = if uninstall {
         std::env::current_exe()
             .unwrap()
@@ -357,12 +396,14 @@ mod tests {
         let canonical = std::fs::canonicalize(&root).unwrap();
         super::run_shortcuts(&canonical, true, false, Some(&links)).unwrap();
         assert!(links.join("Flow.lnk").is_file());
+        assert!(links.join("Uninstall Flow.lnk").is_file());
         // Repeat after a partial installation, then remove only a matching target.
         super::run_shortcuts(&canonical, true, false, Some(&links)).unwrap();
         super::run_shortcuts(temp.path(), true, true, Some(&links)).unwrap();
         assert!(links.join("Flow.lnk").is_file());
         super::run_shortcuts(&canonical, true, true, Some(&links)).unwrap();
         assert!(!links.join("Flow.lnk").exists());
+        assert!(!links.join("Uninstall Flow.lnk").exists());
     }
 
     #[test]
@@ -375,6 +416,10 @@ mod tests {
         std::fs::write(&source, b"new").unwrap();
         super::place_payload(&source, dir.path()).unwrap();
         assert_eq!(std::fs::read(dir.path().join("Flow.exe")).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(dir.path().join("Flow-Uninstall.exe")).unwrap(),
+            b"new"
+        );
         assert_eq!(
             std::fs::read(dir.path().join("data/tasks.json")).unwrap(),
             b"user tasks"
@@ -391,5 +436,35 @@ mod tests {
     fn setup_detection_does_not_match_normal_arguments() {
         assert!(!super::requested(&["--open".into(), "test.torrent".into()]));
         assert!(super::requested(&["--install".into()]));
+        assert!(super::uninstaller_name("Flow-Uninstall.exe"));
+        assert!(!super::uninstaller_name("Flow.exe"));
+    }
+    #[test]
+    fn uninstall_removes_only_program_files_and_supports_old_installations() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "Flow.exe",
+            "Flow-Uninstall.exe",
+            "flow-install.json",
+            "video.mp4",
+        ] {
+            std::fs::write(root.path().join(name), b"fixture").unwrap();
+        }
+        for name in ["data", "runtime", "downloads"] {
+            std::fs::create_dir(root.path().join(name)).unwrap();
+            std::fs::write(root.path().join(name).join("keep.bin"), b"preserve").unwrap();
+        }
+        super::remove_program_files(root.path()).unwrap();
+        assert!(!root.path().join("Flow-Uninstall.exe").exists());
+        assert!(!root.path().join("Flow.exe").exists());
+        assert!(!root.path().join("flow-install.json").exists());
+        assert!(root.path().join("video.mp4").exists());
+        for name in ["data", "runtime", "downloads"] {
+            assert_eq!(
+                std::fs::read(root.path().join(name).join("keep.bin")).unwrap(),
+                b"preserve"
+            );
+        }
+        super::remove_program_files(root.path()).unwrap();
     }
 }

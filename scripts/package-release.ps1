@@ -14,6 +14,7 @@ $portable=Join-Path $OutputDirectory "Flow-$Version-portable"
 New-Item -ItemType Directory -Force $portable | Out-Null
 Copy-Item -LiteralPath $Executable -Destination (Join-Path $portable 'Flow.exe')
 foreach($name in @('README.md','README.zh-CN.md')){Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $portable}
+Copy-Item -LiteralPath (Join-Path $repository 'vendor/librqbit/LICENSE') -Destination (Join-Path $portable 'librqbit-LICENSE.txt')
 $assets=Join-Path $portable 'assets'
 New-Item -ItemType Directory -Force $assets | Out-Null
 Copy-Item -LiteralPath (Join-Path $repository 'assets/flow-icon.png') -Destination $assets

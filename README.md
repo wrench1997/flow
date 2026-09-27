@@ -15,7 +15,7 @@ One executable starts both the desktop interface and embedded download engine. N
 
 ## Packaging and updates
 
-- Windows installer: choose a per-user installation directory, create shortcuts and register an uninstall entry. Uninstall retains downloads, runtime and personal data.
+- Windows installer: choose a per-user installation directory, create shortcuts and register an uninstall entry. Installation includes `Flow-Uninstall.exe`; use it, the Start menu's Uninstall Flow shortcut, or Windows Installed apps. Exit Flow from the tray before uninstalling. Uninstall retains downloads, runtime and personal data. Reinstall to add these entries to an older installation; portable copies can be removed manually.
 - Portable ZIP: extract the folder and run `Flow.exe`, with no installation required.
 - Automatic update checks on startup, manual checks, download progress and confirmation before replacing the executable. Installation stops Flow and restarts it afterward, preserving user data and an old-executable backup.
 - Configurable HTTPS GitHub mirror prefix, with fallback to GitHub. Signed update manifests and SHA-256 verification are enforced even through a mirror.
