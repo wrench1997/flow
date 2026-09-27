@@ -72,11 +72,30 @@ pub async fn check_local(session: &librqbit::Session) -> Value {
 pub fn metadata_stage(trace: &Value) -> &'static str {
     if trace["completed"].as_u64().unwrap_or(0) > 0 {
         "元数据已验证"
+    } else if trace["collected_pieces"].as_u64().unwrap_or(0) > 0 {
+        "已保留部分元数据，继续寻找缺失片段"
+    } else if trace["peers"]
+        .as_array()
+        .is_some_and(|peers| peers.iter().any(|p| p["state"] == "receiving_metadata"))
+    {
+        "正在接收元数据"
+    } else if trace["peers"]
+        .as_array()
+        .is_some_and(|peers| peers.iter().any(|p| p["state"] == "waiting_metadata"))
+    {
+        "握手已完成，等待元数据"
+    } else if trace["peers"].as_array().is_some_and(|peers| {
+        peers
+            .iter()
+            .any(|p| matches!(p["state"].as_str(), Some("connecting" | "handshaking")))
+    }) {
+        "已发现节点，正在尝试连接和握手"
     } else if trace["errors"].as_u64().unwrap_or(0) > 0
         && trace["peers"].as_array().is_some_and(|peers| {
-            !peers.is_empty() && peers.iter().all(|peer| {
-                matches!(peer["state"].as_str(), Some("failed" | "cancelled"))
-            })
+            !peers.is_empty()
+                && peers
+                    .iter()
+                    .all(|peer| matches!(peer["state"].as_str(), Some("failed" | "cancelled")))
         })
     {
         "已尝试的节点未提供元数据，继续寻找来源"
@@ -88,6 +107,36 @@ pub fn metadata_stage(trace: &Value) -> &'static str {
         "已发现节点，正在尝试连接和握手"
     } else {
         "尚未发现可尝试的节点"
+    }
+}
+
+pub fn metadata_failure(error: &str) -> &'static str {
+    if error.contains("checksum invalid") {
+        "元数据哈希不匹配，已丢弃片段"
+    } else if error.contains("rejected remaining metadata") {
+        "节点拒绝提供所需元数据"
+    } else if error.contains("does not support ut_metadata")
+        || error.contains("does not support extended")
+    {
+        "节点不支持元数据交换"
+    } else if error.contains("metadata size")
+        || error.contains("UtMetadata")
+        || error.contains("metadata piece")
+    {
+        "元数据大小或片段不合法"
+    } else if error.contains("memory budget") {
+        "元数据缓存已达上限，等待重试"
+    } else if error.contains("timed out") || error.contains("timeout") || error.contains("elapsed")
+    {
+        "连接或元数据响应超时"
+    } else if error.contains("disconnected") {
+        "节点已断开连接"
+    } else if error.contains("refused") || error.contains("10061") {
+        "节点拒绝连接"
+    } else if error.is_empty() {
+        ""
+    } else {
+        "连接或元数据交换失败"
     }
 }
 
@@ -294,6 +343,29 @@ pub async fn probe(input: &std::path::Path, output: &std::path::Path) -> anyhow:
 mod tests {
     use super::*;
     #[test]
+    fn metadata_diagnostics_describe_current_work_and_actual_failures() {
+        assert_eq!(
+            metadata_stage(&json!({"handshakes":10,"peers":[{"state":"connecting"}]})),
+            "已发现节点，正在尝试连接和握手"
+        );
+        assert_eq!(
+            metadata_stage(&json!({"collected_pieces":1,"errors":2,"peers":[{"state":"failed"}]})),
+            "已保留部分元数据，继续寻找缺失片段"
+        );
+        assert_eq!(
+            metadata_failure("peer rejected remaining metadata requests"),
+            "节点拒绝提供所需元数据"
+        );
+        assert_eq!(
+            metadata_failure("info checksum invalid; discarded unverified fragments"),
+            "元数据哈希不匹配，已丢弃片段"
+        );
+        assert_eq!(
+            metadata_failure("metadata memory budget exhausted"),
+            "元数据缓存已达上限，等待重试"
+        );
+    }
+    #[test]
     fn metadata_stages_require_observed_evidence() {
         for (stats, label) in [
             (json!({}), "尚未发现可尝试的节点"),
@@ -304,9 +376,11 @@ mod tests {
         ] {
             assert_eq!(metadata_stage(&stats), label);
         }
-        assert_eq!(metadata_stage(&json!({"handshakes":1,"errors":1,
+        assert_eq!(
+            metadata_stage(&json!({"handshakes":1,"errors":1,
             "peers":[{"state":"failed"}]})),
-            "已尝试的节点未提供元数据，继续寻找来源");
+            "已尝试的节点未提供元数据，继续寻找来源"
+        );
     }
     #[tokio::test]
     async fn occupied_fixed_port_falls_back_and_local_check_is_honest() {

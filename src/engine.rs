@@ -411,6 +411,17 @@ impl Engine {
         while resolutions.join_next().await.is_some() {}
     }
 
+    async fn metadata_cancelled(&self,id:&str,started_paused:bool) {
+        loop {
+            tokio::select! {
+                _=self.session.cancellation_token().cancelled()=>return,
+                _=tokio::time::sleep(Duration::from_millis(200))=>{
+                    if self.entry(id).map_or(true,|e|!started_paused && e.paused) {return;}
+                }
+            }
+        }
+    }
+
     async fn load(self: &Arc<Self>, id: &str) -> Result<()> {
         self.completed_cache.lock().unwrap().remove(id);
         let mut operation = Some(self.operations.lock().await);
@@ -460,8 +471,9 @@ impl Engine {
             for tr in &entry.trackers {
                 magnet.query_pairs_mut().append_pair("tr", tr);
             }
-            let mut resolved = None;
-            for attempt in 1..=2 {
+            let mut attempt = 0u32;
+            let resolved = loop {
+                attempt = attempt.saturating_add(1);
                 // Tracker-less magnets can use subscribed public sources before
                 // metadata resolution. Do not augment explicit/private tracker sets.
                 if !self.offline && !magnet.query_pairs().any(|(k, _)| k == "tr") {
@@ -474,18 +486,17 @@ impl Engine {
                     let client = reqwest::Client::builder()
                         .timeout(Duration::from_secs(5))
                         .build()?;
-                    if let Ok((sources, _)) = tokio::time::timeout(
-                        Duration::from_secs(15),
-                        self.subscriptions.candidates(&client),
-                    )
-                    .await
-                    {
+                    let sources=tokio::select! {
+                        result=tokio::time::timeout(Duration::from_secs(15),self.subscriptions.candidates(&client))=>result,
+                        _=self.metadata_cancelled(id,entry.paused)=>{self.loading.lock().unwrap().remove(id);return Ok(());},
+                    };
+                    if let Ok((sources, _)) = sources {
                         for tracker in sources.keys().take(40) {
                             magnet.query_pairs_mut().append_pair("tr", tracker);
                         }
                     }
                 }
-                self.loading.lock().unwrap().insert(id.into(),json!({"stage":format!("获取元数据，第 {attempt}/2 轮；DHT {}，候选 Tracker {}，缓存节点 {}",if self.session.get_dht().is_some(){"已启用"}else{"关闭"},magnet.query_pairs().filter(|(k,_)| k=="tr").count(),seen_peers.len()),"started":trackers::now()}));
+                self.loading.lock().unwrap().insert(id.into(),json!({"stage":format!("获取元数据，第 {attempt} 轮；DHT {}，候选 Tracker {}，缓存节点 {}",if self.session.get_dht().is_some(){"已启用"}else{"关闭"},magnet.query_pairs().filter(|(k,_)| k=="tr").count(),seen_peers.len()),"started":trackers::now()}));
                 let resolution = tokio::time::timeout(
                     Duration::from_secs(90),
                     self.session.add_torrent(
@@ -499,12 +510,12 @@ impl Engine {
                 );
                 let response = tokio::select! {
                     result = resolution => result,
+                    _ = self.session.cancellation_token().cancelled() => {self.loading.lock().unwrap().remove(id);return Ok(());},
                     _ = async { loop { tokio::time::sleep(Duration::from_millis(200)).await; if self.entry(id).map_or(true, |e| !entry.paused && e.paused) { break; } } } => {self.loading.lock().unwrap().remove(id);return Ok(());},
                 };
                 match response {
                     Ok(Ok(value)) => {
-                        resolved = Some(value);
-                        break;
+                        break value;
                     }
                     error => {
                         let reason = match error {
@@ -512,6 +523,19 @@ impl Engine {
                             Err(_) => "90 秒内未收到完整元数据".into(),
                             _ => unreachable!(),
                         };
+                        if let Some(hash)=librqbit::Magnet::parse(&entry.source).ok().and_then(|m|m.as_id20()) {
+                            let trace=self.session.resolution_diagnostics(hash);
+                            let mut peers=trace["peers"].as_array().cloned().unwrap_or_default();
+                            peers.sort_by_key(|p|std::cmp::Reverse(p["metadata_bytes"].as_u64().unwrap_or(0)));
+                            let previous=std::mem::take(&mut seen_peers);
+                            for peer in peers {
+                                if let Some(addr)=peer["address"].as_str().and_then(|a|a.parse().ok()) {
+                                    if !seen_peers.contains(&addr) {seen_peers.push(addr);}
+                                }
+                            }
+                            for addr in previous {if !seen_peers.contains(&addr){seen_peers.push(addr);}}
+                            seen_peers.truncate(64);
+                        }
                         self.event(
                             id,
                             "warning",
@@ -520,8 +544,16 @@ impl Engine {
                         );
                     }
                 }
-            }
-            match resolved.context("元数据获取失败：两轮找源仍未收到完整元数据。请查看诊断日志，重试或导入 .torrent；Tracker 有做种统计不代表节点可连接。")? {
+                if self.offline && attempt >= 2 { bail!("离线测试未取得元数据"); }
+                let delay=(15u64 * u64::from(attempt)).min(120);
+                self.loading.lock().unwrap().insert(id.into(),json!({"stage":format!("未取得完整元数据，{delay} 秒后继续找源；已收集片段保留"),"started":trackers::now(),"retry_at":trackers::now()+delay}));
+                tokio::select! {
+                    _=tokio::time::sleep(Duration::from_secs(delay))=>{},
+                    _=self.session.cancellation_token().cancelled()=>{self.loading.lock().unwrap().remove(id);return Ok(());},
+                    _=async { loop {tokio::time::sleep(Duration::from_millis(200)).await;if self.entry(id).map_or(true,|e|!entry.paused && e.paused){break;} } }=>{self.loading.lock().unwrap().remove(id);return Ok(());},
+                }
+            };
+            match resolved {
                 AddTorrentResponse::ListOnly(r) => {
                     seen_peers = r.seen_peers;
                     seen_peers.truncate(64);
@@ -1601,7 +1633,8 @@ impl Engine {
                         if trace.is_object() {
                             item["resolution"] = trace;
                             if self.loading.lock().unwrap().get(&e.id).is_some_and(|load| load["files"].is_null()) {
-                                item["diagnosis"] = json!(format!("{}；已观察 {} 个节点，尝试 {} 次，握手 {} 次，失败 {} 次，收到元数据 {} 字节",crate::network::metadata_stage(&item["resolution"]),item["resolution"]["observed_peers"],item["resolution"]["attempts"],item["resolution"]["handshakes"],item["resolution"]["errors"],item["resolution"]["metadata_bytes"]));
+                                item["metadata_retry_at"] = self.loading.lock().unwrap().get(&e.id).map(|l|l["retry_at"].clone()).unwrap_or(Value::Null);
+                                item["diagnosis"] = json!(format!("{}；已观察 {} 个节点，尝试 {} 次，握手 {} 次，失败 {} 次，收到元数据 {} 字节；保留片段 {}/{}",crate::network::metadata_stage(&item["resolution"]),item["resolution"]["observed_peers"],item["resolution"]["attempts"],item["resolution"]["handshakes"],item["resolution"]["errors"],item["resolution"]["metadata_bytes"],item["resolution"]["collected_pieces"],item["resolution"]["total_pieces"]));
                             }
                         }
                     }
@@ -2923,4 +2956,161 @@ mod tests {
     #[tokio::test(flavor="multi_thread",worker_threads=4)]
     async fn ipv6_utp_only_magnet_metadata_and_verified_file_transfer() {transport_fixture(true,true).await;}
 
+}
+
+
+#[cfg(test)]
+mod metadata_regression_tests {
+    use super::*;
+    use serde_bencode::value::Value as B;
+    use librqbit_sha1_wrapper::{ISha1,Sha1};
+    use tokio::io::{AsyncReadExt,AsyncWriteExt};
+
+    fn fixture(padding: usize) -> (Vec<u8>,String) {
+        let mut payload_hash=Sha1::new();payload_hash.update(b"abc");
+        let info=B::Dict([
+            (b"name".to_vec(),B::Bytes(b"metadata-fixture.bin".to_vec())),
+            (b"length".to_vec(),B::Int(3)),
+            (b"piece length".to_vec(),B::Int(16384)),
+            (b"pieces".to_vec(),B::Bytes(payload_hash.finish().to_vec())),
+            (b"x-flow-test".to_vec(),B::Bytes(vec![42;padding])),
+        ].into_iter().collect());
+        let bytes=serde_bencode::to_bytes(&info).unwrap();
+        let mut hash=Sha1::new();hash.update(&bytes);
+        (bytes,hash.finish().iter().map(|b|format!("{b:02x}")).collect())
+    }
+    async fn node(info: Vec<u8>, allowed: Option<u32>, corrupt: bool) -> (std::net::SocketAddr,tokio::task::JoinHandle<()>) {
+        node_declared(info,allowed,corrupt,None).await
+    }
+    async fn node_declared(info:Vec<u8>,allowed:Option<u32>,corrupt:bool,declared:Option<i64>) -> (std::net::SocketAddr,tokio::task::JoinHandle<()>) {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr=listener.local_addr().unwrap();
+        let task=tokio::spawn(async move {
+            let (mut socket,_)=listener.accept().await.unwrap();
+            let mut hs=[0;68];socket.read_exact(&mut hs).await.unwrap();
+            hs[48..].copy_from_slice(b"-FX0001-123456789012");
+            socket.write_all(&hs).await.unwrap();
+            let handshake=b"\x14\x00d1:md11:ut_metadatai2eee";
+            socket.write_all(&(handshake.len() as u32).to_be_bytes()).await.unwrap();
+            socket.write_all(handshake).await.unwrap();
+            let mut remote=3u8;
+            loop {
+                let Ok(n)=socket.read_u32().await else {break};
+                assert!(n<65536);if n==0 {continue;}
+                let mut body=vec![0;n as usize];if socket.read_exact(&mut body).await.is_err(){break;}
+                if body.starts_with(&[20,0]) {
+                    if let Ok(B::Dict(m))=serde_bencode::from_bytes::<B>(&body[2..]) {
+                        if let Some(B::Dict(ext))=m.get(b"m".as_slice()) {
+                            if let Some(B::Int(id))=ext.get(b"ut_metadata".as_slice()){remote=*id as u8;}
+                        }
+                    }
+                } else if body.starts_with(&[20,2]) {
+                    let B::Dict(request)=serde_bencode::from_bytes::<B>(&body[2..]).unwrap() else {continue};
+                    let Some(B::Int(piece))=request.get(b"piece".as_slice()) else {continue};
+                    let piece=*piece as u32;
+                    if allowed.is_some_and(|p|p!=piece){continue;}
+                    let start=piece as usize*16384;if start>=info.len(){continue;}
+                    let header=serde_bencode::to_bytes(&B::Dict([
+                        (b"msg_type".to_vec(),B::Int(1)),(b"piece".to_vec(),B::Int(piece as i64)),
+                        (b"total_size".to_vec(),B::Int(declared.unwrap_or(info.len() as i64))),
+                    ].into_iter().collect())).unwrap();
+                    let mut reply=vec![20,remote];reply.extend(header);reply.extend(&info[start..info.len().min(start+16384)]);
+                    if corrupt {*reply.last_mut().unwrap() ^= 1;}
+                    if socket.write_all(&(reply.len() as u32).to_be_bytes()).await.is_err(){break;}
+                    if socket.write_all(&reply).await.is_err(){break;}
+                    if allowed.is_some() || corrupt {break;}
+                }
+            }
+        });(addr,task)
+    }
+    async fn resolve(engine: &Engine, hash:&str, peers:Vec<std::net::SocketAddr>) -> Result<AddTorrentResponse> {
+        engine.session.add_torrent(AddTorrent::from_url(format!("magnet:?xt=urn:btih:{hash}")),Some(AddTorrentOptions{list_only:true,initial_peers:Some(peers),..Default::default()})).await
+    }
+    #[tokio::test]
+    async fn metadata_without_handshake_size_is_verified() {
+        let temp=tempfile::tempdir().unwrap();let engine=Engine::new(temp.path(),true).await.unwrap();
+        let (info,hash)=fixture(0);let (addr,server)=node(info.clone(),None,false).await;
+        let r=tokio::time::timeout(Duration::from_secs(5),resolve(&engine,&hash,vec![addr])).await.unwrap().unwrap();
+        let AddTorrentResponse::ListOnly(r)=r else {panic!("metadata only")};
+        assert_eq!(librqbit::torrent_from_bytes(&r.torrent_bytes).unwrap().info_hash.as_string(),hash);
+        assert!(!temp.path().join("downloads/metadata-fixture.bin").exists());
+        server.abort();engine.session.stop().await;
+    }
+    #[tokio::test]
+    async fn fragments_survive_disconnect_and_next_resolution_round() {
+        let temp=tempfile::tempdir().unwrap();let engine=Engine::new(temp.path(),true).await.unwrap();
+        let (info,hash)=fixture(20000);let (first,a)=node(info.clone(),Some(0),false).await;
+        let _=tokio::time::timeout(Duration::from_secs(2),resolve(&engine,&hash,vec![first])).await;
+        let id=librqbit::Magnet::parse(&format!("magnet:?xt=urn:btih:{hash}")).unwrap().as_id20().unwrap();
+        assert_eq!(engine.session.resolution_diagnostics(id)["collected_pieces"],1);
+        let (second,b)=node(info,Some(1),false).await;
+        let r=tokio::time::timeout(Duration::from_secs(5),resolve(&engine,&hash,vec![second])).await;
+        assert!(r.is_ok(),"{}",engine.session.resolution_diagnostics(id));
+        let r=r.unwrap().unwrap();
+        assert!(matches!(r,AddTorrentResponse::ListOnly(_)));
+        assert_eq!(engine.session.resolution_diagnostics(id)["collected_pieces"],2);
+        a.abort();b.abort();engine.session.stop().await;
+    }
+    #[tokio::test]
+    async fn corrupt_metadata_is_discarded_and_good_peer_recovers() {
+        let temp=tempfile::tempdir().unwrap();let engine=Engine::new(temp.path(),true).await.unwrap();
+        let (info,hash)=fixture(0);let (bad,a)=node(info.clone(),None,true).await;
+        let _=tokio::time::timeout(Duration::from_secs(2),resolve(&engine,&hash,vec![bad])).await;
+        let id=librqbit::Magnet::parse(&format!("magnet:?xt=urn:btih:{hash}")).unwrap().as_id20().unwrap();
+        assert_eq!(engine.session.resolution_diagnostics(id)["collected_pieces"],0);
+        let (good,b)=node(info,None,false).await;
+        assert!(tokio::time::timeout(Duration::from_secs(5),resolve(&engine,&hash,vec![good])).await.unwrap().is_ok());
+        a.abort();b.abort();engine.session.stop().await;
+    }
+    #[tokio::test]
+    async fn failed_peer_is_retried_after_backoff_without_new_discovery() {
+        let temp=tempfile::tempdir().unwrap();let engine=Engine::new(temp.path(),true).await.unwrap();
+        let (info,hash)=fixture(0);let (backend,server)=node(info,None,false).await;
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let addr=listener.local_addr().unwrap();
+        let proxy=tokio::spawn(async move {
+            let (socket,_)=listener.accept().await.unwrap();drop(socket);
+            let (mut socket,_)=listener.accept().await.unwrap();
+            let mut upstream=tokio::net::TcpStream::connect(backend).await.unwrap();
+            let _=tokio::io::copy_bidirectional(&mut socket,&mut upstream).await;
+        });
+        let started=std::time::Instant::now();
+        let result=tokio::time::timeout(Duration::from_secs(80),resolve(&engine,&hash,vec![addr])).await.unwrap().unwrap();
+        assert!(matches!(result,AddTorrentResponse::ListOnly(_)));
+        assert!(started.elapsed()>=Duration::from_secs(60));
+        let id=librqbit::Magnet::parse(&format!("magnet:?xt=urn:btih:{hash}")).unwrap().as_id20().unwrap();
+        assert!(engine.session.resolution_diagnostics(id)["attempts"].as_u64().unwrap()>=2);
+        proxy.abort();server.abort();engine.session.stop().await;
+    }
+    #[tokio::test]
+    async fn invalid_metadata_sizes_do_not_poison_the_collector() {
+        let temp=tempfile::tempdir().unwrap();let engine=Engine::new(temp.path(),true).await.unwrap();
+        let (info,hash)=fixture(20000);
+        let id=librqbit::Magnet::parse(&format!("magnet:?xt=urn:btih:{hash}")).unwrap().as_id20().unwrap();
+        for size in [0,32*1024*1024+1] {
+            let (bad,task)=node_declared(info.clone(),Some(0),false,Some(size)).await;
+            let _=tokio::time::timeout(Duration::from_secs(1),resolve(&engine,&hash,vec![bad])).await;
+            assert_eq!(engine.session.resolution_diagnostics(id)["collected_pieces"],0);
+            assert_eq!(engine.session.resolution_diagnostics(id)["metadata_size"],0);
+            task.abort();
+        }
+        let (good,task)=node(info,None,false).await;
+        assert!(tokio::time::timeout(Duration::from_secs(5),resolve(&engine,&hash,vec![good])).await.unwrap().is_ok());
+        task.abort();engine.session.stop().await;
+    }
+    #[tokio::test]
+    async fn pending_metadata_pause_and_shutdown_cancel_promptly() {
+        let temp=tempfile::tempdir().unwrap();let engine=Engine::new(temp.path(),true).await.unwrap();
+        let (_,hash)=fixture(0);
+        engine.entries.lock().unwrap().push(Entry{id:"pending".into(),source:format!("magnet:?xt=urn:btih:{hash}"),save_path:temp.path().join("downloads").display().to_string(),..Default::default()});
+        let loading=engine.load("pending");tokio::pin!(loading);
+        tokio::select! {r=&mut loading=>panic!("finished before pause: {r:?}"),_=tokio::time::sleep(Duration::from_millis(300))=>{}}
+        engine.entries.lock().unwrap()[0].paused=true;
+        tokio::time::timeout(Duration::from_secs(1),&mut loading).await.unwrap().unwrap();
+        assert!(!engine.loading.lock().unwrap().contains_key("pending"));
+        engine.entries.lock().unwrap()[0].paused=false;
+        let loading=engine.load("pending");tokio::pin!(loading);
+        tokio::select! {r=&mut loading=>panic!("finished before shutdown: {r:?}"),_=tokio::time::sleep(Duration::from_millis(300))=>{}}
+        engine.session.cancellation_token().cancel();
+        tokio::time::timeout(Duration::from_secs(1),loading).await.unwrap().unwrap();
+    }
 }

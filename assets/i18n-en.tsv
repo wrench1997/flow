@@ -479,3 +479,19 @@ Cache|Cached peers
 设置已保存；网络协议、端口和连接上限在完全退出并重启 Flow 后生效。|Settings saved. Network transports, port and peer limit apply after fully exiting and restarting Flow.
 本机监听检查完成；不代表公网入站可达。请查看网络诊断。|Local listener checks completed; public inbound reachability is unverified. See network diagnostics.
 {}；已观察 {} 个节点，尝试 {} 次，握手 {} 次，失败 {} 次，收到元数据 {} 字节|{}; {} peers observed, {} attempts, {} handshakes, {} failures, {} metadata bytes received
+
+已保留部分元数据，继续寻找缺失片段|Partial metadata retained; searching for missing fragments
+保留元数据片段 {}/{}；全部收齐后进行哈希校验|Retained metadata fragments {}/{}; hash verification follows assembly
+{}；已观察 {} 个节点，尝试 {} 次，握手 {} 次，失败 {} 次，收到元数据 {} 字节；保留片段 {}/{}|{}; {} peers observed, {} attempts, {} handshakes, {} failures, {} metadata bytes received; retained fragments {}/{}
+获取元数据，第 {} 轮；DHT {}，候选 Tracker {}，缓存节点 {}|Metadata discovery, round {}; DHT {}, {} candidate trackers, {} cached peers
+未取得完整元数据，{} 秒后继续找源；已收集片段保留|Incomplete metadata; discovery resumes in {} seconds; collected fragments retained
+{} 秒后继续找源；可随时暂停|Discovery resumes in {} seconds; pause at any time
+元数据哈希不匹配，已丢弃片段|Metadata hash mismatch; fragments discarded
+节点拒绝提供所需元数据|Peer rejected the required metadata requests
+节点不支持元数据交换|Peer does not support metadata exchange
+元数据大小或片段不合法|Invalid metadata size or fragment
+元数据缓存已达上限，等待重试|Metadata cache limit reached; waiting to retry
+连接或元数据响应超时|Connection or metadata response timed out
+节点已断开连接|Peer disconnected
+节点拒绝连接|Peer refused the connection
+连接或元数据交换失败|Connection or metadata exchange failed

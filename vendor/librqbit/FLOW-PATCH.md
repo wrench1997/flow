@@ -13,3 +13,10 @@ it does not change scheduling or banning policy.
 
 The disabled upstream webui frontend is not included. Runtime downloads and
 generated build artifacts are not part of this source copy.
+
+Metadata resolution also supports first-block size discovery, shared in-memory
+fragment collection with full SHA-1 validation, bounded request windows and
+peer retries with backoff. Completion is consumed before a simultaneous peer
+disconnect is reported. Resolution telemetry exposes retained fragment counts;
+collectors are limited to 32 MiB each and 64 MiB in aggregate and released after
+successful resolution. No payload pieces are accepted without normal validation.

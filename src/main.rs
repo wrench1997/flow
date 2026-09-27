@@ -753,16 +753,18 @@ impl DownloadApp {
                         ui.add_space(6.0);
                         ui.colored_label(if text(&t, "error").is_empty() { Color32::from_rgb(36,140,125) } else { Color32::from_rgb(208,89,89) }, crate::i18n::t(text(&t,"diagnosis")));
                         if ui.small_button(crate::i18n::t("网络与找源诊断")).clicked() {self.tab=4;}
+                        if let Some(at)=t["metadata_retry_at"].as_u64() {ui.weak(crate::i18n::t(format!("{} 秒后继续找源；可随时暂停",at.saturating_sub(crate::trackers::now()))));}
                         if let Some(peers)=t["resolution"]["peers"].as_array() {
                             egui::CollapsingHeader::new(crate::i18n::t("元数据找源记录（本次会话）")).show(ui,|ui| {
                                 ui.weak(crate::i18n::t("元数据字节不是文件下载量；仅记录已观察到的节点，最多 256 个。"));
+                                ui.label(crate::i18n::t(format!("保留元数据片段 {}/{}；全部收齐后进行哈希校验",num(&t["resolution"],"collected_pieces"),num(&t["resolution"],"total_pieces"))));
                                 egui::Grid::new("metadata_peers").striped(true).num_columns(5).show(ui,|ui| {
                                     for h in ["地址","发现渠道","解析阶段","协议","错误原因"] {ui.strong(crate::i18n::t(h));}ui.end_row();
                                     for peer in peers {
                                         ui.label(text(peer,"address"));
                                         ui.label(list(&peer["sources"]).iter().filter_map(Value::as_str).map(crate::i18n::t).collect::<Vec<_>>().join(" / "));
                                         ui.label(crate::i18n::t(match text(peer,"state").as_str(){"discovered"=>"已发现", "connecting"=>"连接中", "handshaking"=>"握手中", "waiting_metadata"=>"等待元数据", "receiving_metadata"=>"接收元数据", "metadata_ready"=>"元数据已验证", "failed"=>"失败", "cancelled"=>"本次尝试已停止", _=>"未知"}));
-                                        ui.label(text(peer,"transport"));ui.label(text(peer,"error"));ui.end_row();
+                                        ui.label(text(peer,"transport"));let error=text(peer,"error");ui.label(crate::i18n::t(crate::network::metadata_failure(&error))).on_hover_text(error);ui.end_row();
                                     }
                                 });
                             });

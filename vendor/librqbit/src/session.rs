@@ -1704,6 +1704,7 @@ impl Session {
             } => {
                 trace!(?info, "received result from DHT");
                 let info = info.validate()?;
+                self.resolution_trace(info_hash).release_verified_metadata();
                 Ok(ResolveMagnetResult {
                     metadata: TorrentMetadata::new(
                         info,

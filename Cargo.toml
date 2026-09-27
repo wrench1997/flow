@@ -1,6 +1,6 @@
 [package]
 name = "flow-download"
-version = "0.4.13"
+version = "0.4.14"
 edition = "2024"
 
 [features]
@@ -37,6 +37,7 @@ tempfile = "3"
 
 [patch.crates-io]
 librqbit = { path = "vendor/librqbit" }
+librqbit-peer-protocol = { path = "vendor/librqbit-peer-protocol" }
 
 [build-dependencies]
 winresource = "0.1.31"

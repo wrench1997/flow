@@ -26,12 +26,17 @@ struct State {
     errors: u64,
     metadata_bytes: u64,
     completed: u64,
+    final_progress: (usize, usize, usize),
 }
 #[derive(Default)]
-pub(crate) struct Trace(Mutex<State>);
+pub(crate) struct Trace {
+    state: Mutex<State>,
+    pub(crate) metadata:
+        std::sync::Arc<parking_lot::RwLock<Option<crate::peer_info_reader::HandlerLocked>>>,
+}
 impl Trace {
     fn update(&self, addr: SocketAddr, f: impl FnOnce(&mut State, &mut Peer)) {
-        let mut state = self.0.lock();
+        let mut state = self.state.lock();
         if !state.peers.contains_key(&addr) && state.peers.len() >= 256 {
             return;
         }
@@ -97,9 +102,17 @@ impl Trace {
             }
         });
     }
+    pub fn release_verified_metadata(&self) {
+        let mut metadata = self.metadata.write();
+        if let Some(m) = metadata.take() {
+            self.state.lock().final_progress = m.progress();
+        }
+    }
     pub fn snapshot(&self) -> Value {
-        let s = self.0.lock();
-        json!({"observed_peers":s.peers.len(),"discoveries":s.discoveries,"attempts":s.attempts,
+        let progress = self.metadata.read().as_ref().map(|m| m.progress());
+        let s = self.state.lock();
+        let progress = progress.unwrap_or(s.final_progress);
+        json!({"collected_pieces":progress.0,"total_pieces":progress.1,"metadata_size":progress.2,"observed_peers":s.peers.len(),"discoveries":s.discoveries,"attempts":s.attempts,
             "handshakes":s.handshakes,"errors":s.errors,"metadata_bytes":s.metadata_bytes,"completed":s.completed,
             "peers":s.peers.iter().map(|(addr,p)|{let mut v=serde_json::to_value(p).unwrap();v["address"]=json!(addr.to_string());v}).collect::<Vec<_>>()})
     }

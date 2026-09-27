@@ -40,7 +40,10 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
     let mut seen = HashSet::<SocketAddr>::new();
     let mut addrs = addrs_stream;
 
-    let semaphore = tokio::sync::Semaphore::new(128);
+    let semaphore = tokio::sync::Semaphore::new(32);
+    let mut retries = std::collections::HashMap::<SocketAddr, (tokio::time::Instant, u32)>::new();
+    let mut retry_counts = std::collections::HashMap::<SocketAddr, u32>::new();
+    let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(1));
 
     let read_info_guarded = |addr| {
         let semaphore = &semaphore;
@@ -49,8 +52,12 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
         let trace = trace.clone();
         async move {
             let token = semaphore.acquire().await?;
-            if let Some(trace) = &trace {trace.attempt(addr);}
-            let _guard = trace.as_ref().map(|t|crate::resolution_trace::AttemptGuard(t.clone(),addr));
+            if let Some(trace) = &trace {
+                trace.attempt(addr);
+            }
+            let _guard = trace
+                .as_ref()
+                .map(|t| crate::resolution_trace::AttemptGuard(t.clone(), addr));
             let ret = peer_info_reader::read_metainfo_from_peer(
                 addr,
                 peer_id,
@@ -66,41 +73,54 @@ pub async fn read_metainfo_from_peer_receiver<A: Stream<Item = SocketAddr> + Unp
             .instrument(debug_span!("read_metainfo_from_peer", ?addr))
             .await
             .with_context(|| format!("error reading metainfo from {addr}"));
-            if let Some(trace) = &trace {trace.finished(addr,ret.as_ref().err().map(|e|format!("{e:#}")));}
+            if let Some(trace) = &trace {
+                trace.finished(addr, ret.as_ref().err().map(|e| format!("{e:#}")));
+            }
             drop(token);
-            ret
+            Ok::<_, anyhow::Error>((addr, ret))
         }
     };
 
     let mut unordered = FuturesUnordered::new();
 
     for a in initial_addrs {
-        seen.insert(a);
-        unordered.push(read_info_guarded(a));
+        if seen.insert(a) {
+            unordered.push(read_info_guarded(a));
+        }
     }
 
     let mut addrs_completed = false;
 
     loop {
-        if addrs_completed && unordered.is_empty() {
+        if addrs_completed && unordered.is_empty() && retries.is_empty() {
             return ReadMetainfoResult::ChannelClosed { seen };
         }
 
         tokio::select! {
             done = unordered.next(), if !unordered.is_empty() => {
                 match done {
-                    Some(Ok((info, info_bytes))) => return ReadMetainfoResult::Found { info, info_bytes, seen, rx: addrs },
-                    Some(Err(e)) => {
+                    Some(Ok((_, Ok((info, info_bytes))))) => return ReadMetainfoResult::Found { info, info_bytes, seen, rx: addrs },
+                    Some(Ok((addr,Err(e)))) => {
                         debug!("{:#}", e);
+                        let count=retry_counts.entry(addr).or_default();
+                        *count=count.saturating_add(1);
+                        let delay=(30u64.saturating_mul(1u64 << (*count).min(4))).min(300) + u64::from(addr.port()%11);
+                        if retries.len()<256 { retries.insert(addr,(tokio::time::Instant::now()+std::time::Duration::from_secs(delay),*count)); }
                     },
+                    Some(Err(e)) => debug!("{:#}",e),
                     None => unreachable!()
                 }
             }
 
-            next_addr = addrs.next(), if !addrs_completed => {
+            _ = retry_tick.tick(), if !retries.is_empty() => {
+                let now=tokio::time::Instant::now();
+                let ready: Vec<_>=retries.iter().filter_map(|(a,(at,_))| (*at<=now).then_some(*a)).take(32usize.saturating_sub(unordered.len())).collect();
+                for addr in ready { retries.remove(&addr); unordered.push(read_info_guarded(addr)); }
+            }
+            next_addr = addrs.next(), if !addrs_completed && unordered.len()<128 => {
                 match next_addr {
                     Some(addr) => {
-                        if seen.insert(addr) {
+                        if seen.len()<4096 && seen.insert(addr) {
                             unordered.push(read_info_guarded(addr));
                         }
                         continue;
