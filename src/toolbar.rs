@@ -16,14 +16,15 @@ pub enum Icon {
 pub fn button(ui: &mut egui::Ui, enabled: bool, icon: Icon, hint: &str) -> egui::Response {
     let hint = crate::i18n::t(hint);
     let response = ui
-        .add_enabled(enabled, egui::Button::new("").min_size(vec2(32.0, 30.0)))
+        .add_enabled(enabled, egui::Button::new("").min_size(vec2(26.0, 24.0)))
         .on_hover_text(&hint)
         .on_disabled_hover_text(&hint);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, &hint));
     let p = ui.painter();
     let center = response.rect.center();
-    let stroke = Stroke::new(1.7_f32, ui.style().interact(&response).fg_stroke.color);
-    let point = |x: f32, y: f32| center + vec2(x, y);
+    let stroke = Stroke::new(1.3_f32, ui.style().interact(&response).fg_stroke.color);
+    let scale = 0.72_f32;
+    let point = |x: f32, y: f32| center + vec2(x, y) * scale;
     let line = |a: (f32, f32), b: (f32, f32)| {
         p.line_segment([point(a.0, a.1), point(b.0, b.1)], stroke);
     };
@@ -45,7 +46,7 @@ pub fn button(ui: &mut egui::Ui, enabled: bool, icon: Icon, hint: &str) -> egui:
         }
         Icon::Player => {
             p.rect_stroke(
-                egui::Rect::from_center_size(center, vec2(22., 18.)),
+                egui::Rect::from_center_size(center, vec2(22., 18.) * scale),
                 3.,
                 stroke,
                 egui::StrokeKind::Inside,
@@ -63,7 +64,7 @@ pub fn button(ui: &mut egui::Ui, enabled: bool, icon: Icon, hint: &str) -> egui:
             line((0., -10.), (0., 0.));
         }
         Icon::Check => {
-            p.circle_stroke(center, 9., stroke);
+            p.circle_stroke(center, 9. * scale, stroke);
             line((-5., 0.), (-1., 4.));
             line((-1., 4.), (5., -4.));
         }
@@ -83,8 +84,8 @@ pub fn button(ui: &mut egui::Ui, enabled: bool, icon: Icon, hint: &str) -> egui:
             line((2., -2.), (2., 5.));
         }
         Icon::Settings => {
-            p.circle_stroke(center, 6., stroke);
-            p.circle_stroke(center, 2., stroke);
+            p.circle_stroke(center, 6. * scale, stroke);
+            p.circle_stroke(center, 2. * scale, stroke);
             for i in 0..8 {
                 let a = i as f32 * std::f32::consts::TAU / 8.;
                 line((a.cos() * 6., a.sin() * 6.), (a.cos() * 10., a.sin() * 10.));
@@ -92,12 +93,12 @@ pub fn button(ui: &mut egui::Ui, enabled: bool, icon: Icon, hint: &str) -> egui:
         }
         Icon::Subscriptions => {
             let origin = point(-7., 7.);
-            p.circle_filled(origin, 1.8, stroke.color);
+            p.circle_filled(origin, 1.8 * scale, stroke.color);
             for radius in [8., 15.] {
                 let pts = (0..17)
                     .map(|i| {
                         let a = i as f32 * std::f32::consts::FRAC_PI_2 / 16.;
-                        origin + vec2(a.sin() * radius, -a.cos() * radius)
+                        origin + vec2(a.sin() * radius, -a.cos() * radius) * scale
                     })
                     .collect();
                 p.add(egui::Shape::line(pts, stroke));
@@ -113,7 +114,7 @@ pub fn button(ui: &mut egui::Ui, enabled: bool, icon: Icon, hint: &str) -> egui:
             ));
         }
         Icon::Theme => {
-            p.circle_stroke(center, 8., stroke);
+            p.circle_stroke(center, 8. * scale, stroke);
             p.add(egui::Shape::convex_polygon(
                 (0..17)
                     .map(|i| {
