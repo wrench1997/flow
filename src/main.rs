@@ -48,6 +48,7 @@ enum Event {
 }
 
 struct DownloadApp {
+    shutdown: backend::Shutdown,
     clipboard_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     clipboard_worker: Option<thread::JoinHandle<()>>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -271,11 +272,20 @@ impl DownloadApp {
                 }
             })
         };
+        let shutdown = backend::Shutdown::default();
+        let worker_shutdown = shutdown.clone();
         let worker = thread::spawn(move || {
             'startup: loop {
+                if worker_shutdown.requested() {
+                    return;
+                }
                 let _ = events.send(Event::Starting("正在启动下载引擎…".into()));
                 ctx.request_repaint();
-                let mut backend = match backend::Backend::launch_in(request_root.clone(), false) {
+                let mut backend = match backend::Backend::launch_with_shutdown(
+                    request_root.clone(),
+                    false,
+                    worker_shutdown.clone(),
+                ) {
                     Ok(backend) => backend,
                     Err(error) => {
                         let _ = events.send(Event::StartupFailed(error));
@@ -442,6 +452,9 @@ impl DownloadApp {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
+                    if worker_shutdown.requested() {
+                        return;
+                    }
                     let response = client
                         .get(format!("{base}/api/state"))
                         .query(&[("selected", &selected)])
@@ -460,6 +473,9 @@ impl DownloadApp {
                             Event::State(state)
                         }
                         Err(e) => {
+                            if worker_shutdown.requested() {
+                                return;
+                            }
                             let alive = client
                                 .get(format!("{base}/api/health"))
                                 .bearer_auth(&token)
@@ -494,7 +510,8 @@ impl DownloadApp {
             updater: updater::Updater::new(root.clone()),
             media_choice: None,
             pending_open: Default::default(),
-            tray: tray::Tray::new(cc).ok(),
+            tray: tray::Tray::new(cc, shutdown.clone()).ok(),
+            shutdown,
             exit_requested: false,
             add_paused: false,
             remove_mode: "keep".into(),
@@ -1828,6 +1845,8 @@ impl eframe::App for DownloadApp {
 
 impl Drop for DownloadApp {
     fn drop(&mut self) {
+        self.shutdown.request();
+        let _ = self.tx.send(Command::Shutdown);
         self.clipboard_stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(worker) = self.clipboard_worker.take() {

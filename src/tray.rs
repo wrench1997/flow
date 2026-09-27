@@ -12,7 +12,10 @@ pub struct Tray {
     pub events: mpsc::Receiver<Action>,
 }
 impl Tray {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        shutdown: crate::backend::Shutdown,
+    ) -> anyhow::Result<Self> {
         let ctx = &cc.egui_ctx;
         let native = match cc.window_handle()?.as_raw() {
             raw_window_handle::RawWindowHandle::Win32(h) => h.hwnd.get(),
@@ -38,7 +41,9 @@ impl Tray {
                 let _ = sender.send(Action::Show);
             }
             if event.id == exit_id {
+                shutdown.request();
                 let _ = sender.send(Action::Exit);
+                context.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
             }
             context.request_repaint();
         }));

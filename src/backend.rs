@@ -2,11 +2,39 @@
 use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
 use tokio::sync::oneshot;
 
+#[derive(Clone, Default)]
+pub struct Shutdown(std::sync::Arc<std::sync::Mutex<(bool, Option<oneshot::Sender<()>>)>>);
+impl Shutdown {
+    pub fn request(&self) {
+        let mut state = self.0.lock().unwrap();
+        state.0 = true;
+        if let Some(sender) = state.1.take() {
+            let _ = sender.send(());
+        }
+    }
+    fn stop_current(&self) {
+        if let Some(sender) = self.0.lock().unwrap().1.take() {
+            let _ = sender.send(());
+        }
+    }
+    pub fn requested(&self) -> bool {
+        self.0.lock().unwrap().0
+    }
+    fn register(&self, sender: oneshot::Sender<()>) {
+        let mut state = self.0.lock().unwrap();
+        if state.0 {
+            let _ = sender.send(());
+        } else {
+            state.1 = Some(sender);
+        }
+    }
+}
+
 pub struct Backend {
     pub base: String,
     pub token: String,
     pub root: PathBuf,
-    stop: Option<oneshot::Sender<()>>,
+    stop: Shutdown,
     worker: Option<thread::JoinHandle<()>>,
     ready: Option<mpsc::Receiver<Result<String, String>>>,
 }
@@ -72,8 +100,16 @@ impl Backend {
         }
     }
     pub fn launch_in(root: PathBuf, offline: bool) -> Result<Self, String> {
+        Self::launch_with_shutdown(root, offline, Shutdown::default())
+    }
+    pub fn launch_with_shutdown(
+        root: PathBuf,
+        offline: bool,
+        shutdown: Shutdown,
+    ) -> Result<Self, String> {
         let token = uuid::Uuid::new_v4().simple().to_string();
         let (stop, stopped) = oneshot::channel();
+        shutdown.register(stop);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let backend_root = root.clone();
         let backend_token = token.clone();
@@ -112,7 +148,7 @@ impl Backend {
             base: String::new(),
             token,
             root,
-            stop: Some(stop),
+            stop: shutdown,
             worker: Some(worker),
             ready: Some(ready_rx),
         })
@@ -121,9 +157,7 @@ impl Backend {
 
 impl Drop for Backend {
     fn drop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
+        self.stop.stop_current();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -133,6 +167,40 @@ impl Drop for Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shutdown_is_immediate_idempotent_and_retry_safe() {
+        let shutdown = Shutdown::default();
+        let (tx, mut rx) = oneshot::channel();
+        shutdown.register(tx);
+        shutdown.stop_current();
+        assert!(rx.try_recv().is_ok());
+        assert!(!shutdown.requested());
+        shutdown.request();
+        shutdown.request();
+        let (tx, mut rx) = oneshot::channel();
+        shutdown.register(tx);
+        assert!(rx.try_recv().is_ok());
+    }
+    #[test]
+    fn out_of_band_shutdown_stops_api_and_releases_directory_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let shutdown = Shutdown::default();
+        let mut backend =
+            Backend::launch_with_shutdown(root.path().into(), true, shutdown.clone()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while backend.poll_ready().is_none() {
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!backend.base.is_empty());
+        let started = std::time::Instant::now();
+        shutdown.request();
+        drop(backend);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let restarted = Backend::start_in(root.path().into(), true).unwrap();
+        drop(restarted);
+    }
+
     #[test]
     fn corrupt_settings_report_error_and_retry_preserves_data() {
         let temp = tempfile::tempdir().unwrap();

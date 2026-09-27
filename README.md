@@ -233,3 +233,5 @@ Built with [egui](https://github.com/emilk/egui) and [librqbit](https://github.c
 Tray controls: right-click opens Show main window / Stop downloads and exit; a single left-click does nothing, and a left double-click restores the main window.
 
 Toolbar actions use vector icons with localized hover hints. Tracker subscriptions can be opened directly from the toolbar or Settings, even without a selected task. Settings and utility windows cannot be collapsed.
+
+Exit from the tray requests engine shutdown immediately, independently of pending status requests, then closes the hidden window and saves task state.
