@@ -113,6 +113,7 @@ fn install(source: &Path, root: &Path, desktop: bool) -> Result<()> {
         .open(root.join("data/engine.lock"))?;
     fs2::FileExt::try_lock_exclusive(&lock).context("此目录的 Flow 正在运行，请先从托盘退出")?;
     place_payload(source, &root)?;
+    crate::i18n::save_at(&root, crate::i18n::preference())?;
     let target = root.join("Flow.exe");
     std::fs::write(
         root.join("flow-install.json"),
@@ -207,40 +208,49 @@ impl eframe::App for Installer {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading(if self.uninstall {
+            ui.horizontal(|ui| {
+                ui.label(crate::i18n::t("语言 / Language"));
+                ui.add_enabled_ui(self.rx.is_none(), |ui| {
+                    crate::i18n::selector(ui, "installer-language")
+                });
+            });
+            ui.heading(crate::i18n::t(if self.uninstall {
                 "卸载 Flow"
             } else {
                 concat!("安装 Flow ", env!("CARGO_PKG_VERSION"))
-            });
+            }));
             ui.add_space(12.0);
-            ui.label(if self.uninstall {
+            ui.label(crate::i18n::t(if self.uninstall {
                 "仅移除程序和快捷方式，保留 data、runtime 及下载文件。"
             } else {
                 "为当前 Windows 用户安装，无需管理员权限。"
-            });
+            }));
             ui.add_enabled(
                 !self.uninstall && self.rx.is_none() && !self.done,
                 egui::TextEdit::singleline(&mut self.directory).desired_width(500.0),
             );
             if !self.uninstall && !self.done {
                 if ui
-                    .add_enabled(self.rx.is_none(), egui::Button::new("选择目录…"))
+                    .add_enabled(
+                        self.rx.is_none(),
+                        egui::Button::new(crate::i18n::t("选择目录…")),
+                    )
                     .clicked()
                 {
                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
                         self.directory = path.display().to_string();
                     }
                 }
-                ui.checkbox(&mut self.desktop, "创建桌面快捷方式");
+                ui.checkbox(&mut self.desktop, crate::i18n::t("创建桌面快捷方式"));
             }
             if ui
                 .add_enabled(
                     self.rx.is_none() && !self.done,
-                    egui::Button::new(if self.uninstall {
+                    egui::Button::new(crate::i18n::t(if self.uninstall {
                         "确认卸载"
                     } else {
                         "安装"
-                    }),
+                    })),
                 )
                 .clicked()
             {
@@ -261,9 +271,9 @@ impl eframe::App for Installer {
                     let _ = tx.send(result.map_err(|e| format!("{e:#}")));
                 });
             }
-            ui.label(&self.status);
+            ui.label(crate::i18n::t(&self.status));
             if self.done {
-                if !self.uninstall && ui.button("启动 Flow").clicked() {
+                if !self.uninstall && ui.button(crate::i18n::t("启动 Flow")).clicked() {
                     let mut cmd = Command::new(PathBuf::from(&self.directory).join("Flow.exe"));
                     hidden(&mut cmd);
                     match cmd.spawn() {
@@ -271,7 +281,7 @@ impl eframe::App for Installer {
                         Err(e) => self.status = e.to_string(),
                     }
                 }
-                if ui.button("关闭").clicked() {
+                if ui.button(crate::i18n::t("关闭")).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }

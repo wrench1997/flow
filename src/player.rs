@@ -67,7 +67,6 @@ impl Player {
                 "--force-window=yes",
                 "--osc=yes",
                 "--terminal=no",
-                "--title=Flow · 视频",
                 "--keep-open=yes",
                 "--cache=yes",
                 "--cache-secs=20",
@@ -75,6 +74,7 @@ impl Player {
                 "--network-timeout=20",
                 "--ytdl=no",
             ])
+            .arg(crate::i18n::t("--title=Flow · 视频"))
             .arg(format!("--input-ipc-server={pipe}"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -301,31 +301,31 @@ impl Player {
         }
         ctx.request_repaint_after(Duration::from_millis(250));
         let mut open = self.open;
-        egui::Window::new("Flow 播放器").open(&mut open).default_width(640.0).show(ctx,|ui| {
+        egui::Window::new(crate::i18n::t("Flow 播放器")).open(&mut open).default_width(640.0).show(ctx,|ui| {
             ui.horizontal(|ui| {
-                ui.heading(egui::RichText::new("FLOW / PLAY").color(egui::Color32::from_rgb(28,180,164)));
-                if ui.button("打开文件…").clicked() {
+                ui.heading(egui::RichText::new(crate::i18n::t("FLOW / PLAY")).color(egui::Color32::from_rgb(28,180,164)));
+                if ui.button(crate::i18n::t("打开文件…")).clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_file() { self.source=path.display().to_string(); self.open_source(); }
                 }
             });
-            ui.horizontal(|ui| { ui.add(egui::TextEdit::singleline(&mut self.source).hint_text("本地文件路径 / HTTP(S) 媒体直链").desired_width(480.0));
-                if ui.button("播放").clicked() { self.open_source(); }
+            ui.horizontal(|ui| { ui.add(egui::TextEdit::singleline(&mut self.source).hint_text(crate::i18n::t("本地文件路径 / HTTP(S) 媒体直链")).desired_width(480.0));
+                if ui.button(crate::i18n::t("播放")).clicked() { self.open_source(); }
             });
             ui.separator();
             if self.setup.is_some() {
-                ui.horizontal(|ui| { ui.spinner(); ui.label(&self.setup_status); });
-                ui.weak("首次播放会自动下载并校验 mpv，完成后继续播放；不需要运行脚本。");
-                if self.pending_play.is_some() && ui.button("安装完成后不自动播放").clicked() { self.pending_play = None; }
+                ui.horizontal(|ui| { ui.spinner(); ui.label(crate::i18n::t(&self.setup_status)); });
+                ui.weak(crate::i18n::t("首次播放会自动下载并校验 mpv，完成后继续播放；不需要运行脚本。"));
+                if self.pending_play.is_some() && ui.button(crate::i18n::t("安装完成后不自动播放")).clicked() { self.pending_play = None; }
             } else if !self.root.join("runtime/mpv/mpv.exe").is_file() {
-                ui.label("播放器尚未安装。首次播放也会自动配置。");
-                if ui.button("安装 / 重试安装播放器").clicked() { self.begin_setup(); }
+                ui.label(crate::i18n::t("播放器尚未安装。首次播放也会自动配置。"));
+                if ui.button(crate::i18n::t("安装 / 重试安装播放器")).clicked() { self.begin_setup(); }
             }
             ui.label(egui::RichText::new(&self.title).strong());
             let buffering=self.props["paused-for-cache"]==true;
-            ui.label(if buffering {"正在缓冲 · 等待播放所需数据"} else if self.props["eof-reached"]==true {"播放结束"} else if self.props["pause"]==true {"已暂停播放"} else if self.child.is_some() {"播放内核已连接"} else {"打开媒体开始播放"});
+            ui.label(crate::i18n::t(if buffering {"正在缓冲 · 等待播放所需数据"} else if self.props["eof-reached"]==true {"播放结束"} else if self.props["pause"]==true {"已暂停播放"} else if self.child.is_some() {"播放内核已连接"} else {"打开媒体开始播放"}));
             let duration=self.props["duration"].as_f64().unwrap_or(0.0);
             let position=self.props["time-pos"].as_f64().unwrap_or(0.0);
-            ui.label(format!("{} / {}    已缓冲 {:.1} 秒", clock(position),clock(duration),self.props["demuxer-cache-duration"].as_f64().unwrap_or(0.0)));
+            ui.label(crate::i18n::t(format!("{} / {}    已缓冲 {:.1} 秒", clock(position),clock(duration),self.props["demuxer-cache-duration"].as_f64().unwrap_or(0.0))));
             // Retain the drag target while new time-pos events arrive.
             let seek_id=ui.id().with("seek");
             if !ui.ctx().dragged_id().is_some() { self.seek=position; }
@@ -334,36 +334,36 @@ impl Player {
                 if slider.drag_stopped() || (slider.changed() && !slider.dragged()) { self.command(json!(["seek",self.seek,"absolute+exact"])); }
             });
             ui.horizontal(|ui| {
-                if ui.button("−10 秒").clicked() {self.command(json!(["seek",-10,"relative"]));}
-                if ui.button(if self.props["pause"]==true {"▶ 继续"} else {"Ⅱ 暂停"}).clicked() {self.command(json!(["cycle","pause"]));}
-                if ui.button("停止").clicked() {self.pending_play=None;self.command(json!(["stop"]));self.props=json!({});}
-                if ui.button("+10 秒").clicked() {self.command(json!(["seek",10,"relative"]));}
-                if ui.button("全屏").clicked() {self.command(json!(["cycle","fullscreen"]));}
+                if ui.button(crate::i18n::t("−10 秒")).clicked() {self.command(json!(["seek",-10,"relative"]));}
+                if ui.button(crate::i18n::t(if self.props["pause"]==true {"▶ 继续"} else {"Ⅱ 暂停"})).clicked() {self.command(json!(["cycle","pause"]));}
+                if ui.button(crate::i18n::t("停止")).clicked() {self.pending_play=None;self.command(json!(["stop"]));self.props=json!({});}
+                if ui.button(crate::i18n::t("+10 秒")).clicked() {self.command(json!(["seek",10,"relative"]));}
+                if ui.button(crate::i18n::t("全屏")).clicked() {self.command(json!(["cycle","fullscreen"]));}
             });
             ui.horizontal(|ui| {
                 let mut volume=self.props["volume"].as_f64().unwrap_or(100.0);
-                if ui.add(egui::Slider::new(&mut volume,0.0..=100.0).text("音量")).changed() {self.command(json!(["set_property","volume",volume]));}
+                if ui.add(egui::Slider::new(&mut volume,0.0..=100.0).text(crate::i18n::t("音量"))).changed() {self.command(json!(["set_property","volume",volume]));}
                 let mut speed=self.props["speed"].as_f64().unwrap_or(1.0);
-                egui::ComboBox::from_id_salt("play-speed").selected_text(format!("{speed}×")).show_ui(ui,|ui| {
-                    for value in [0.5,0.75,1.0,1.25,1.5,2.0] { if ui.selectable_value(&mut speed,value,format!("{value}×")).changed() {self.command(json!(["set_property","speed",speed]));} }
+                egui::ComboBox::from_id_salt("play-speed").selected_text(crate::i18n::t(format!("{speed}×"))).show_ui(ui,|ui| {
+                    for value in [0.5,0.75,1.0,1.25,1.5,2.0] { if ui.selectable_value(&mut speed,value,crate::i18n::t(format!("{value}×"))).changed() {self.command(json!(["set_property","speed",speed]));} }
                 });
             });
             ui.horizontal(|ui| {
-                if ui.button("加载字幕…").clicked() {if let Some(path)=rfd::FileDialog::new().add_filter("字幕", &["srt","ass","ssa","vtt"]).pick_file() {self.command(json!(["sub-add",path.display().to_string(),"select"]));}}
-                if ui.button("关闭字幕").clicked() {self.command(json!(["set_property","sid","no"]));}
+                if ui.button(crate::i18n::t("加载字幕…")).clicked() {if let Some(path)=rfd::FileDialog::new().add_filter(crate::i18n::t("字幕"), &["srt","ass","ssa","vtt"]).pick_file() {self.command(json!(["sub-add",path.display().to_string(),"select"]));}}
+                if ui.button(crate::i18n::t("关闭字幕")).clicked() {self.command(json!(["set_property","sid","no"]));}
                 if let Some(tracks)=self.props["track-list"].as_array() {
                     for (kind,label,property) in [("audio","音轨","aid"),("sub","字幕","sid")] {
-                        egui::ComboBox::from_id_salt(property).selected_text(label).show_ui(ui,|ui| {
+                        egui::ComboBox::from_id_salt(property).selected_text(crate::i18n::t(label)).show_ui(ui,|ui| {
                             for track in tracks.iter().filter(|t|t["type"]==kind) {
                                 let label=format!("{} · {} {}",track["id"],track["lang"].as_str().unwrap_or(""),track["title"].as_str().unwrap_or(""));
-                                if ui.selectable_label(track["selected"]==true,label).clicked() {self.command(json!(["set_property",property,track["id"]]));}
+                                if ui.selectable_label(track["selected"]==true,crate::i18n::t(label)).clicked() {self.command(json!(["set_property",property,track["id"]]));}
                             }
                         });
                     }
                 }
             });
-            ui.weak("视频在独立窗口显示。画面窗口：移动鼠标显示进度条，可拖动跳转、点击暂停和调音量；空格暂停，F 全屏。关闭此控制面板不停止播放。停止播放不会暂停下载任务。");
-            if !self.message.is_empty() {ui.colored_label(egui::Color32::from_rgb(200,85,80), &self.message);}
+            ui.weak(crate::i18n::t("视频在独立窗口显示。画面窗口：移动鼠标显示进度条，可拖动跳转、点击暂停和调音量；空格暂停，F 全屏。关闭此控制面板不停止播放。停止播放不会暂停下载任务。"));
+            if !self.message.is_empty() {ui.colored_label(egui::Color32::from_rgb(200,85,80), crate::i18n::t(&self.message));}
         });
         self.open = self.open && open;
     }

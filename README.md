@@ -176,11 +176,14 @@ A scrape failure does not prove a Tracker cannot return peers. Reported seed cou
 
 ## Local data and portability
 
+The toolbar and Settings offer **Automatic (system)**, **简体中文**, and **English**. Automatic uses the Windows display language: Chinese systems use Simplified Chinese; other systems use English. Switching is immediate and does not restart downloads. The installer passes its language choice to the installed app; player, updater, tray and uninstaller use the same preference, saved in `data/ui-language.json`. File names, URLs, paths and copied diagnostics are preserved; system dialogs and external error details may retain their original language.
+
 Runtime data lives in `data/` beside the executable:
 
 | Path | Purpose |
 | --- | --- |
 | `settings.json` | Download directory and transfer settings |
+| `ui-language.json` | Automatic, Chinese, or English interface preference |
 | `tasks-rust.json` | Task catalog and Tracker history |
 | `tracker-sources.json` / `tracker-cache.json` | Subscription settings, cached lists, and retry state |
 | `dht.json` | DHT routing state |

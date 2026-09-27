@@ -6,6 +6,9 @@ pub enum Action {
 }
 pub struct Tray {
     _icon: tray_icon::TrayIcon,
+    show: tray_icon::menu::MenuItem,
+    exit: tray_icon::menu::MenuItem,
+    english: bool,
     pub events: mpsc::Receiver<Action>,
 }
 impl Tray {
@@ -20,8 +23,8 @@ impl Tray {
             menu::{Menu, MenuEvent, MenuItem},
         };
         let menu = Menu::new();
-        let show = MenuItem::new("显示 Flow", true, None);
-        let exit = MenuItem::new("退出并停止下载", true, None);
+        let show = MenuItem::new(crate::i18n::t("显示 Flow"), true, None);
+        let exit = MenuItem::new(crate::i18n::t("退出并停止下载"), true, None);
         menu.append(&show)?;
         menu.append(&exit)?;
         let (tx, events) = mpsc::channel();
@@ -53,12 +56,26 @@ impl Tray {
         let icon = TrayIconBuilder::new()
             .with_icon(icon)
             .with_menu(Box::new(menu))
-            .with_tooltip("Flow · 双击显示窗口 / 右键退出")
+            .with_tooltip(crate::i18n::t("Flow · 双击显示窗口 / 右键退出"))
             .build()?;
         Ok(Self {
             _icon: icon,
+            show,
+            exit,
+            english: crate::i18n::english(),
             events,
         })
+    }
+    pub fn refresh_language(&mut self) {
+        let english = crate::i18n::english();
+        if english != self.english {
+            self.show.set_text(crate::i18n::t("显示 Flow"));
+            self.exit.set_text(crate::i18n::t("退出并停止下载"));
+            let _ = self
+                ._icon
+                .set_tooltip(Some(crate::i18n::t("Flow · 双击显示窗口 / 右键退出")));
+            self.english = english;
+        }
     }
 }
 pub(crate) fn wake_window(native: isize) {

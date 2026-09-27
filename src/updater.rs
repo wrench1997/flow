@@ -319,23 +319,23 @@ impl Updater {
         }
         let mut open = true;
         let mut exit = false;
-        egui::Window::new("软件更新").open(&mut open).default_width(560.0).show(ctx,|ui|{
-            ui.heading(format!("Flow {}",env!("CARGO_PKG_VERSION")));
-            ui.checkbox(&mut self.config.auto_check,"启动时自动检查更新（安装前需确认）");
-            ui.label("GitHub 镜像代理前缀（留空直连官方）");
-            ui.add(egui::TextEdit::singleline(&mut self.config.mirror).desired_width(500.0).hint_text("https://你的代理域名/"));
-            ui.weak("代理需支持 前缀/https://github.com/… 格式及 Releases 文件；配置代理时优先使用，失败回退官方。始终验证内置公钥签名和 SHA-256。");
+        egui::Window::new(crate::i18n::t("软件更新")).open(&mut open).default_width(560.0).show(ctx,|ui|{
+            ui.heading(crate::i18n::t(format!("Flow {}",env!("CARGO_PKG_VERSION"))));
+            ui.checkbox(&mut self.config.auto_check,crate::i18n::t("启动时自动检查更新（安装前需确认）"));
+            ui.label(crate::i18n::t("GitHub 镜像代理前缀（留空直连官方）"));
+            ui.add(egui::TextEdit::singleline(&mut self.config.mirror).desired_width(500.0).hint_text(crate::i18n::t("https://你的代理域名/")));
+            ui.weak(crate::i18n::t("代理需支持 前缀/https://github.com/… 格式及 Releases 文件；配置代理时优先使用，失败回退官方。始终验证内置公钥签名和 SHA-256。"));
             ui.horizontal(|ui|{
-                if ui.button("保存更新设置").clicked(){self.status=match self.save(){Ok(())=>"更新设置已保存".into(),Err(e)=>e.to_string()};}
-                if ui.add_enabled(self.rx.is_none(),egui::Button::new("检查更新")).clicked(){self.start_check();}
-                if ui.add_enabled(self.rx.is_none() && self.candidate.is_some() && self.ready.is_none(),egui::Button::new("下载新版")).clicked(){self.start_download();}
+                if ui.button(crate::i18n::t("保存更新设置")).clicked(){self.status=match self.save(){Ok(())=>"更新设置已保存".into(),Err(e)=>e.to_string()};}
+                if ui.add_enabled(self.rx.is_none(),egui::Button::new(crate::i18n::t("检查更新"))).clicked(){self.start_check();}
+                if ui.add_enabled(self.rx.is_none() && self.candidate.is_some() && self.ready.is_none(),egui::Button::new(crate::i18n::t("下载新版"))).clicked(){self.start_download();}
             });
-            ui.label(&self.status);if self.rx.is_some(){ui.spinner();}
+            ui.label(crate::i18n::t(&self.status));if self.rx.is_some(){ui.spinner();}
             if let Some(dir)=self.ready.clone(){
-                ui.weak("安装会停止当前下载并退出，替换程序后自动重开。保留 data、runtime 和下载文件；旧 EXE 保存在更新备份目录。");
-                if ui.button("退出并安装更新").clicked(){match spawn_helper(&dir){Ok(())=>exit=true,Err(e)=>self.status=e.to_string()}}
+                ui.weak(crate::i18n::t("安装会停止当前下载并退出，替换程序后自动重开。保留 data、runtime 和下载文件；旧 EXE 保存在更新备份目录。"));
+                if ui.button(crate::i18n::t("退出并安装更新")).clicked(){match spawn_helper(&dir){Ok(())=>exit=true,Err(e)=>self.status=e.to_string()}}
             }
-            ui.hyperlink_to("打开 GitHub 发布页","https://github.com/wrench1997/flow/releases/latest");
+            ui.hyperlink_to(crate::i18n::t("打开 GitHub 发布页"),"https://github.com/wrench1997/flow/releases/latest");
         });
         self.open = open;
         exit

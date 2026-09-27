@@ -1,6 +1,6 @@
 [package]
 name = "flow-download"
-version = "0.4.7"
+version = "0.4.8"
 edition = "2024"
 
 [dependencies]
@@ -8,6 +8,7 @@ eframe = { version = "0.33", default-features = false, features = ["default_font
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "query"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+regex = "1"
 uuid = { version = "1", features = ["v4"] }
 librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
 librqbit-sha1-wrapper = { version = "9.0.1", default-features = false, features = ["sha1-ring"] }

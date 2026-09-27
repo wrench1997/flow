@@ -4,6 +4,7 @@ mod backend;
 mod engine;
 mod file_ops;
 mod http_download;
+mod i18n;
 mod installer;
 mod media;
 mod open_request;
@@ -145,17 +146,17 @@ fn task_progress(ui: &mut egui::Ui, task: &Value) {
     ui.painter().text(
         egui::pos2(rect.right(), rect.center().y),
         egui::Align2::RIGHT_CENTER,
-        if checking {
+        crate::i18n::t(if checking {
             "校验中".into()
         } else if text(task, "state") == "loading" {
             "恢复中".into()
         } else {
             format!("{:.1}%", progress * 100.0)
-        },
+        }),
         egui::FontId::proportional(12.0),
         ui.visuals().text_color(),
     );
-    response.on_hover_text(text(task, "diagnosis"));
+    response.on_hover_text(crate::i18n::t(text(task, "diagnosis")));
 }
 fn status(t: &Value) -> &str {
     if !text(t, "error").is_empty() {
@@ -596,8 +597,10 @@ impl DownloadApp {
         self.remove_open = true;
     }
     fn chart(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.curve_global, "显示全部任务合计");
-        ui.label("最近 5 分钟 · 绿色：下载，紫色：上传 · 仅保留本次运行数据");
+        ui.checkbox(&mut self.curve_global, crate::i18n::t("显示全部任务合计"));
+        ui.label(crate::i18n::t(
+            "最近 5 分钟 · 绿色：下载，紫色：上传 · 仅保留本次运行数据",
+        ));
         let key = if self.curve_global {
             ""
         } else {
@@ -651,14 +654,14 @@ impl DownloadApp {
         ui.painter().text(
             rect.left_bottom(),
             egui::Align2::LEFT_BOTTOM,
-            "−5 分钟",
+            crate::i18n::t("−5 分钟"),
             egui::FontId::proportional(11.0),
             ui.visuals().text_color(),
         );
         ui.painter().text(
             rect.right_bottom(),
             egui::Align2::RIGHT_BOTTOM,
-            "现在",
+            crate::i18n::t("现在"),
             egui::FontId::proportional(11.0),
             ui.visuals().text_color(),
         );
@@ -677,7 +680,7 @@ impl DownloadApp {
             .iter()
             .enumerate()
             {
-                ui.selectable_value(&mut self.tab, i, *label);
+                ui.selectable_value(&mut self.tab, i, crate::i18n::t(*label));
             }
         });
         ui.separator();
@@ -685,15 +688,15 @@ impl DownloadApp {
             let task = list(&self.state["tasks"]).into_iter().find(|t| text(t, "id") == self.selected);
             if self.tab == 5 { self.chart(ui); }
             else if self.tab == 4 {
-                if ui.button("复制当前诊断 JSON").clicked() {
+                if ui.button(crate::i18n::t("复制当前诊断 JSON")).clicked() {
                     ui.ctx().copy_text(serde_json::to_string_pretty(&self.state).unwrap_or_default());
                     self.message = "诊断已复制到剪贴板（包含本机路径和对等连接地址）".into();
                 }
                 egui::Grid::new("events").striped(true).num_columns(3).show(ui, |ui| {
                     for e in list(&self.state["events"]).iter().rev().filter(|e| self.selected.is_empty() || text(e,"task").is_empty() || text(e,"task") == self.selected).take(150) {
-                        ui.label(text(e, "time"));
-                        ui.colored_label(if text(e,"level") == "error" {Color32::from_rgb(205,65,65)} else {ui.visuals().text_color()}, text(e,"level"));
-                        ui.label(text(e, "message")); ui.end_row();
+                        ui.label(crate::i18n::t(text(e, "time")));
+                        ui.colored_label(if text(e,"level") == "error" {Color32::from_rgb(205,65,65)} else {ui.visuals().text_color()}, crate::i18n::t(text(e,"level")));
+                        ui.label(crate::i18n::t(text(e, "message"))); ui.end_row();
                     }
                 });
             } else if let Some(t) = task {
@@ -701,7 +704,7 @@ impl DownloadApp {
                     0 => {
                         ui.label(RichText::new(text(&t,"name")).strong().size(17.0));
                         ui.add_space(6.0);
-                        ui.colored_label(if text(&t, "error").is_empty() { Color32::from_rgb(36,140,125) } else { Color32::from_rgb(208,89,89) }, text(&t,"diagnosis"));
+                        ui.colored_label(if text(&t, "error").is_empty() { Color32::from_rgb(36,140,125) } else { Color32::from_rgb(208,89,89) }, crate::i18n::t(text(&t,"diagnosis")));
                         ui.add_space(8.0);
                         egui::Grid::new("overview").num_columns(4).spacing([24.0, 10.0]).show(ui, |ui| {
                             for (a,b,c,d) in [
@@ -709,17 +712,17 @@ impl DownloadApp {
                                 ("下载速度", format!("{}/s",bytes(num(&t,"download_rate"))), "上传速度", format!("{}/s",bytes(num(&t,"upload_rate")))),
                                 ("已连接用户", format!("{:.0}",num(&t,"peers")), "已连接做种者", if t["seeds"].is_number(){format!("{:.0}",num(&t,"seeds"))}else{"未知".into()}),
                                 ("缺失分片覆盖", if num(&t,"availability") < 0.0 {"未知".into()} else {format!("{:.1}%（在线节点声明）",num(&t,"availability") * 100.0)}, "引擎状态", text(&t,"state")),
-                            ] { ui.weak(a); ui.label(b); ui.weak(c); ui.label(d); ui.end_row(); }
+                            ] { ui.weak(crate::i18n::t(a)); ui.label(crate::i18n::t(b)); ui.weak(crate::i18n::t(c)); ui.label(crate::i18n::t(d)); ui.end_row(); }
                         });
                         ui.add_space(12.0);
-                        ui.label(format!("保存位置：{}",text(&t,"save_path")));
+                        ui.label(crate::i18n::t(format!("保存位置：{}",text(&t,"save_path"))));
                         if t["coverage"].is_object() {
                             let c=&t["coverage"];
-                            ui.weak(format!("所缺分片 {:.0}，在线节点声明覆盖 {:.0}；已知声明节点 {:.0}，未知声明节点 {:.0}。只表示在线声明，不保证传输。",num(c,"missing_pieces"),num(c,"covered_missing_pieces"),num(c,"known_peers"),num(c,"unknown_peers")));
+                            ui.weak(crate::i18n::t(format!("所缺分片 {:.0}，在线节点声明覆盖 {:.0}；已知声明节点 {:.0}，未知声明节点 {:.0}。只表示在线声明，不保证传输。",num(c,"missing_pieces"),num(c,"covered_missing_pieces"),num(c,"known_peers"),num(c,"unknown_peers"))));
                         }
                         if let Some(sources) = t["webseeds"].as_array() {
-                            egui::CollapsingHeader::new(format!("HTTP WebSeed · {} 个候选", sources.len())).show(ui, |ui| {
-                                ui.weak("HTTP 候选不计入 BT 节点数或资源可用率；验证字节是本次来源传输记录，不是任务完成度。");
+                            egui::CollapsingHeader::new(crate::i18n::t(format!("HTTP WebSeed · {} 个候选", sources.len()))).show(ui, |ui| {
+                                ui.weak(crate::i18n::t("HTTP 候选不计入 BT 节点数或资源可用率；验证字节是本次来源传输记录，不是任务完成度。"));
                                 for source in sources {
                                     ui.label(text(source,"url"));
                                     let status = match text(source,"state").as_str() {
@@ -729,13 +732,13 @@ impl DownloadApp {
                                         "verified_transfer" => "已有校验通过的传输",
                                         _ => "尚未验证",
                                     };
-                                    ui.label(format!("{status} · 校验通过 {} · 失败 {} 次", bytes(num(source,"verified_bytes")),num(source,"failures") as u64));
-                                    if !text(source,"error").is_empty() { ui.weak(text(source,"error")); }
+                                    ui.label(crate::i18n::t(format!("{status} · 校验通过 {} · 失败 {} 次", bytes(num(source,"verified_bytes")),num(source,"failures") as u64)));
+                                    if !text(source,"error").is_empty() { ui.weak(crate::i18n::t(text(source,"error"))); }
                                     ui.separator();
                                 }
                             });
                         }
-                        ui.weak("默认完成后停止做种；可在设置中开启完成后继续做种。未知指标表示引擎没有公开该数据；Tracker 做种统计可在 Tracker 页查看。");
+                        ui.weak(crate::i18n::t("默认完成后停止做种；可在设置中开启完成后继续做种。未知指标表示引擎没有公开该数据；Tracker 做种统计可在 Tracker 页查看。"));
                     }
                     1 => {
                         let files = list(&self.state["detail"]["files"]);
@@ -745,86 +748,92 @@ impl DownloadApp {
                                 self.file_edit = Some((self.selected.clone(),files.iter().filter(|f|f["selected"]==true).filter_map(|f|f["index"].as_u64().map(|i|i as usize)).collect()));
                             }
                             ui.horizontal(|ui| {
-                                if ui.button("全选").clicked() { self.file_edit.as_mut().unwrap().1 = (0..files.len()).collect(); }
-                                if ui.button("清空选择").clicked() { self.file_edit.as_mut().unwrap().1.clear(); }
-                                if ui.button("应用文件选择").clicked() {
+                                if ui.button(crate::i18n::t("全选")).clicked() { self.file_edit.as_mut().unwrap().1 = (0..files.len()).collect(); }
+                                if ui.button(crate::i18n::t("清空选择")).clicked() { self.file_edit.as_mut().unwrap().1.clear(); }
+                                if ui.button(crate::i18n::t("应用文件选择")).clicked() {
                                     let selected = &self.file_edit.as_ref().unwrap().1;
                                     if selected.is_empty() { self.message="至少选择一个文件".into(); }
                                     else { let _ = self.tx.send(Command::Post("/api/files",json!({"id":self.selected,"files":selected}))); }
                                 }
                             });
-                            ui.weak("取消勾选不删除已有数据；相邻文件可能保留共享分块。新建时可勾选“添加后暂停”再选择文件。");
+                            ui.weak(crate::i18n::t("取消勾选不删除已有数据；相邻文件可能保留共享分块。新建时可勾选“添加后暂停”再选择文件。"));
                         }
                         egui::Grid::new("files").striped(true).num_columns(4).min_col_width(60.0).show(ui, |ui| {
-                            ui.strong("下载"); ui.strong("文件路径"); ui.strong("大小"); ui.strong("完成度"); ui.end_row();
+                            ui.strong(crate::i18n::t("下载")); ui.strong(crate::i18n::t("文件路径")); ui.strong(crate::i18n::t("大小")); ui.strong(crate::i18n::t("完成度")); ui.end_row();
                             for f in files {
                                 if bt {
                                     let index = f["index"].as_u64().unwrap_or(0) as usize;
                                     let selected = &mut self.file_edit.as_mut().unwrap().1;
                                     let mut checked = selected.contains(&index);
-                                    if ui.checkbox(&mut checked, "").changed() { if checked { selected.insert(index); } else { selected.remove(&index); } }
-                                } else { ui.label("✓"); }
+                                    if ui.checkbox(&mut checked, crate::i18n::t("")).changed() { if checked { selected.insert(index); } else { selected.remove(&index); } }
+                                } else { ui.label(crate::i18n::t("✓")); }
                                 ui.horizontal(|ui| {
                                     ui.label(text(&f,"path"));
-                                    if bt && media::playable(&text(&f,"path")) && ui.small_button("▶ 播放").on_hover_text("选择此文件并继续下载，边下边播").clicked() {
+                                    if bt && media::playable(&text(&f,"path")) && ui.small_button("▶ 播放").on_hover_text(crate::i18n::t("选择此文件并继续下载，边下边播")).clicked() {
                                         self.player.open=false;
                                         self.message="正在准备播放文件…".into();
                                         let _=self.tx.send(Command::Play(self.selected.clone(),f["index"].as_u64().unwrap_or(0) as usize,text(&f,"path")));
                                     }
-                                }); ui.label(bytes(num(&f,"size")));
-                                ui.label(format!("{:.1}%", if num(&f,"size") == 0.0 {100.0} else {num(&f,"done")/num(&f,"size")*100.0})); ui.end_row();
+                                }); ui.label(crate::i18n::t(bytes(num(&f,"size"))));
+                                ui.label(crate::i18n::t(format!("{:.1}%", if num(&f,"size") == 0.0 {100.0} else {num(&f,"done")/num(&f,"size")*100.0}))); ui.end_row();
                             }
                         });
                     }
                     2 => {
-                        if text(&t,"kind") == "http" { ui.label("HTTP 直链任务不使用 Tracker。"); return; }
+                        if text(&t,"kind") == "http" { ui.label(crate::i18n::t("HTTP 直链任务不使用 Tracker。")); return; }
                         ui.horizontal(|ui| {
                             let running = self.state["detail"]["discovery"]["running"].as_bool().unwrap_or(false);
-                            if ui.add_enabled(!running, egui::Button::new(if running {"正在发现…"} else {"发现与查询统计"})).clicked() {self.action("discover");}
-                            if ui.button("添加 Tracker…").clicked() {self.tracker_open = true;}
-                            if ui.button("订阅设置…").clicked() {
+                            if ui.add_enabled(!running, egui::Button::new(crate::i18n::t(if running {"正在发现…"} else {"发现与查询统计"}))).clicked() {self.action("discover");}
+                            if ui.button(crate::i18n::t("添加 Tracker…")).clicked() {self.tracker_open = true;}
+                            if ui.button(crate::i18n::t("订阅设置…")).clicked() {
                                 self.subscription_edit = serde_json::from_value(self.state["subscriptions"]["config"].clone()).ok();
                             }
-                            if ui.button("重新查询").clicked() {self.action("announce");}
-                            if ui.button("应用候选（重新校验）").clicked() {self.action("apply_trackers");}
+                            if ui.button(crate::i18n::t("重新查询")).clicked() {self.action("announce");}
+                            if ui.button(crate::i18n::t("应用候选（重新校验）")).clicked() {self.action("apply_trackers");}
                         });
-                        ui.label(text(&self.state["detail"]["discovery"], "message"));
-                        ui.weak("这里只展示 Tracker 查询结果，不能证明有人给你上传。实际收数与持续性请看“对等连接”；不同 Tracker 报告人数不可相加。");
+                        ui.label(crate::i18n::t(text(&self.state["detail"]["discovery"], "message")));
+                        ui.weak(crate::i18n::t("这里只展示 Tracker 查询结果，不能证明有人给你上传。实际收数与持续性请看“对等连接”；不同 Tracker 报告人数不可相加。"));
                         egui::Grid::new("trackers").striped(true).num_columns(7).show(ui, |ui| {
-                            for title in ["Tracker 地址", "服务器报告做种数", "查询耗时", "查询成功 / 失败", "列表来源", "查询状态", "响应 / 错误原因"] {ui.strong(title);} ui.end_row();
+                            for title in ["Tracker 地址", "服务器报告做种数", "查询耗时", "查询成功 / 失败", "列表来源", "查询状态", "响应 / 错误原因"] {ui.strong(crate::i18n::t(title));} ui.end_row();
                             for t in list(&self.state["detail"]["trackers"]) {
                                 ui.label(text(&t,"url"));
-                                ui.label(if t["seeders"].is_number() {format!("{:.0}",num(&t,"seeders"))} else {"—".into()});
-                                ui.label(if t["latency_ms"].is_number() {format!("{:.0} ms",num(&t,"latency_ms"))} else {"—".into()});
-                                ui.label(format!("{:.0} / {:.0}",num(&t,"successes"),num(&t,"failures")));
-                                ui.label(text(&t,"source")); ui.label(text(&t,"status")); ui.label(text(&t,"message")); ui.end_row();
+                                ui.label(crate::i18n::t(if t["seeders"].is_number() {format!("{:.0}",num(&t,"seeders"))} else {"—".into()}));
+                                ui.label(crate::i18n::t(if t["latency_ms"].is_number() {format!("{:.0} ms",num(&t,"latency_ms"))} else {"—".into()}));
+                                ui.label(crate::i18n::t(format!("{:.0} / {:.0}",num(&t,"successes"),num(&t,"failures"))));
+                                ui.label(text(&t,"source")); ui.label(crate::i18n::t(text(&t,"status"))); ui.label(crate::i18n::t(text(&t,"message"))); ui.end_row();
                             }
                         });
                     }
                     3 => {
-                        if ui.button("节点记录 / 黑名单管理…").clicked() { self.peer_manager = true; }
-                        ui.weak("排序：持续收数 → 间歇收数 → 新节点观察 → 暂无有效传输。每 10 秒采样，连续 3 次收数才算持续；无数据降序，不自动封禁。此顺序也用于重连候选缓存，不代表强制带宽分配。");
+                        if ui.button(crate::i18n::t("节点记录 / 黑名单管理…")).clicked() { self.peer_manager = true; }
+                        ui.weak(crate::i18n::t("排序：持续收数 → 间歇收数 → 新节点观察 → 暂无有效传输。每 10 秒采样，连续 3 次收数才算持续；无数据降序，不自动封禁。此顺序也用于重连候选缓存，不代表强制带宽分配。"));
                         egui::Grid::new("peers").striped(true).num_columns(7).min_col_width(120.0).show(ui, |ui| {
-                            for h in ["地址", "客户端", "累计接收", "累计上传", "近期接收均速", "传输观察", "连接状态"] {ui.strong(h);} ui.end_row();
+                            for h in ["地址", "客户端", "累计接收", "累计上传", "近期接收均速", "传输观察", "连接状态"] {ui.strong(crate::i18n::t(h));} ui.end_row();
                             for p in list(&self.state["detail"]["peers"]) {
-                                ui.label(text(&p,"address")); ui.label(text(&p,"client"));
-                                ui.label(bytes(num(&p,"downloaded")));
-                                ui.label(bytes(num(&p,"uploaded")));
-                                ui.label(format!("{}/s", bytes(num(&p,"recent_rate"))));
-                                ui.label(text(&p,"transfer_status")).on_hover_text(format!("距开始观察或上次收数 {:.0} 秒",num(&p,"idle_seconds")));
-                                ui.label(text(&p,"state")).on_hover_text(format!("对端允许传输：{}；等待响应的数据块：{}",match p["download_choked"].as_bool(){Some(true)=>"否（choke）",Some(false)=>"是",None=>"未知"},p["pending_requests"].as_u64().map(|n|n.to_string()).unwrap_or("未知".into()))); ui.end_row();
+                                ui.label(crate::i18n::t(text(&p,"address"))); ui.label(text(&p,"client"));
+                                ui.label(crate::i18n::t(bytes(num(&p,"downloaded"))));
+                                ui.label(crate::i18n::t(bytes(num(&p,"uploaded"))));
+                                ui.label(crate::i18n::t(format!("{}/s", bytes(num(&p,"recent_rate")))));
+                                ui.label(crate::i18n::t(text(&p,"transfer_status"))).on_hover_text(crate::i18n::t(format!("距开始观察或上次收数 {:.0} 秒",num(&p,"idle_seconds"))));
+                                ui.label(crate::i18n::t(text(&p,"state"))).on_hover_text(crate::i18n::t(format!("对端允许传输：{}；等待响应的数据块：{}",match p["download_choked"].as_bool(){Some(true)=>"否（choke）",Some(false)=>"是",None=>"未知"},p["pending_requests"].as_u64().map(|n|n.to_string()).unwrap_or("未知".into())))); ui.end_row();
                             }
                         });
                     }
                     _ => {}
                 }
-            } else {ui.weak("选择一个任务，查看文件、Tracker 和连接详情。");}
+            } else {ui.weak(crate::i18n::t("选择一个任务，查看文件、Tracker 和连接详情。"));}
         });
     }
 }
 
 impl eframe::App for DownloadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(crate::i18n::t(
+            "Flow · 下载工作台",
+        )));
+        if let Some(tray) = &mut self.tray {
+            tray.refresh_language();
+        }
         if self.updater.ui(ctx) {
             self.exit_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1021,20 +1030,23 @@ impl eframe::App for DownloadApp {
                         .size(23.0)
                         .color(Color32::from_rgb(24, 147, 127)),
                 );
-                ui.weak("下载工作台");
+                ui.weak(crate::i18n::t("下载工作台"));
                 ui.separator();
                 if ui
-                    .add_enabled(self.connected, egui::Button::new("＋ 新建任务"))
+                    .add_enabled(
+                        self.connected,
+                        egui::Button::new(crate::i18n::t("＋ 新建任务")),
+                    )
                     .clicked()
                 {
                     self.new_task();
                 }
-                if ui.button("播放器…").clicked() {
+                if ui.button(crate::i18n::t("播放器…")).clicked() {
                     self.player.open = true;
                 }
                 if ui
                     .button("退出程序")
-                    .on_hover_text("停止下载并完全退出，包括后台引擎")
+                    .on_hover_text(crate::i18n::t("停止下载并完全退出，包括后台引擎"))
                     .clicked()
                 {
                     self.exit_requested = true;
@@ -1042,13 +1054,13 @@ impl eframe::App for DownloadApp {
                 }
                 ui.add_enabled_ui(self.connected && has_selection, |ui| {
                     if ui
-                        .add_enabled(can_resume, egui::Button::new("▶ 继续"))
+                        .add_enabled(can_resume, egui::Button::new(crate::i18n::t("▶ 继续")))
                         .clicked()
                     {
                         self.action("resume");
                     }
                     if ui
-                        .add_enabled(can_pause, egui::Button::new("Ⅱ 暂停"))
+                        .add_enabled(can_pause, egui::Button::new(crate::i18n::t("Ⅱ 暂停")))
                         .clicked()
                     {
                         self.action("pause");
@@ -1056,28 +1068,32 @@ impl eframe::App for DownloadApp {
                     if ui
                         .add_enabled(
                             selected_task.is_some_and(|t| text(t, "kind") != "http"),
-                            egui::Button::new("校验文件"),
+                            egui::Button::new(crate::i18n::t("校验文件")),
                         )
                         .clicked()
                     {
                         self.action("recheck");
                     }
-                    if ui.button("移除任务").clicked() {
+                    if ui.button(crate::i18n::t("移除任务")).clicked() {
                         self.open_remove();
                     }
                 });
                 if ui
-                    .add_enabled(self.connected, egui::Button::new("设置…"))
+                    .add_enabled(self.connected, egui::Button::new(crate::i18n::t("设置…")))
                     .clicked()
                 {
                     self.settings_edit =
                         serde_json::from_value(self.state["settings"].clone()).ok();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("更新…").clicked() {
+                    if ui.button(crate::i18n::t("更新…")).clicked() {
                         self.updater.open = true;
                     }
-                    if ui.checkbox(&mut self.dark, "深色").changed() {
+                    crate::i18n::selector(ui, "main-language");
+                    if ui
+                        .checkbox(&mut self.dark, crate::i18n::t("深色"))
+                        .changed()
+                    {
                         ctx.set_visuals(if self.dark {
                             egui::Visuals::dark()
                         } else {
@@ -1086,7 +1102,7 @@ impl eframe::App for DownloadApp {
                     }
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search)
-                            .hint_text("搜索任务…")
+                            .hint_text(crate::i18n::t("搜索任务…"))
                             .desired_width(160.0),
                     );
                 });
@@ -1101,7 +1117,7 @@ impl eframe::App for DownloadApp {
                     } else {
                         Color32::from_rgb(210, 90, 60)
                     },
-                    if self.connected {
+                    crate::i18n::t(if self.connected {
                         "● 引擎已连接"
                     } else {
                         if self.starting {
@@ -1109,29 +1125,35 @@ impl eframe::App for DownloadApp {
                         } else {
                             "● 引擎未连接"
                         }
-                    },
+                    }),
                 );
-                if !self.connected && !self.starting && ui.button("重试启动").clicked() {
+                if !self.connected
+                    && !self.starting
+                    && ui.button(crate::i18n::t("重试启动")).clicked()
+                {
                     self.starting = true;
                     let _ = self.tx.send(Command::Retry);
                 }
                 ui.separator();
-                ui.label(text(&self.state, "engine"));
+                ui.label(crate::i18n::t(text(&self.state, "engine")));
                 ui.separator();
-                ui.label(format!(
+                ui.label(crate::i18n::t(format!(
                     "↓ {}/s",
                     bytes(tasks.iter().map(|t| num(t, "download_rate")).sum())
-                ));
-                ui.label(format!(
+                )));
+                ui.label(crate::i18n::t(format!(
                     "↑ {}/s",
                     bytes(tasks.iter().map(|t| num(t, "upload_rate")).sum())
-                ));
+                )));
                 ui.separator();
-                ui.weak(format!("监听端口 {}", num(&self.state, "listen_port")));
+                ui.weak(crate::i18n::t(format!(
+                    "监听端口 {}",
+                    num(&self.state, "listen_port")
+                )));
             });
             if !self.message.is_empty() {
                 ui.horizontal(|ui| {
-                    ui.label(&self.message);
+                    ui.label(crate::i18n::t(&self.message));
                     if ui.small_button("清除").clicked() {
                         self.message.clear();
                     }
@@ -1143,22 +1165,22 @@ impl eframe::App for DownloadApp {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.add_space(12.0);
-                ui.weak("任务分类");
+                ui.weak(crate::i18n::t("任务分类"));
                 ui.add_space(8.0);
                 for (i, label) in ["全部任务", "下载中", "已暂停", "已完成", "错误"]
                     .iter()
                     .enumerate()
                 {
                     let count = tasks.iter().filter(|t| matches_filter(t, i)).count();
-                    ui.selectable_value(&mut self.filter, i, format!("{label}    {count}"));
+                    ui.selectable_value(&mut self.filter, i, crate::i18n::t(format!("{label}    {count}")));
                     ui.add_space(4.0);
                 }
                 ui.separator();
-                ui.weak("本机下载引擎");
-                ui.label("BT / HTTP(S)");
+                ui.weak(crate::i18n::t("本机下载引擎"));
+                ui.label(crate::i18n::t("BT / HTTP(S)"));
                 ui.add_space(12.0);
                 ui.weak(
-                    "自动保存续传状态\nCtrl + 左键：多选任务\n右键 / Delete：批量删除\n空格：暂停 / 继续",
+                    crate::i18n::t("自动保存续传状态\nCtrl + 左键：多选任务\n右键 / Delete：批量删除\n空格：暂停 / 继续"),
                 );
             });
         egui::TopBottomPanel::bottom("detail_panel")
@@ -1168,9 +1190,9 @@ impl eframe::App for DownloadApp {
             .show(ctx, |ui| self.details(ui));
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading(["全部任务", "下载中", "已暂停", "已完成", "错误"][self.filter]);
-                if !self.selection.is_empty() { ui.label(format!("已选 {} 项",self.selection.len())); }
-                ui.weak(format!("{} 个任务", tasks.iter().filter(|t| matches_filter(t, self.filter) && text(t, "name").to_lowercase().contains(&self.search.to_lowercase())).count()));
+                ui.heading(crate::i18n::t(["全部任务", "下载中", "已暂停", "已完成", "错误"][self.filter]));
+                if !self.selection.is_empty() { ui.label(crate::i18n::t(format!("已选 {} 项",self.selection.len()))); }
+                ui.weak(crate::i18n::t(format!("{} 个任务", tasks.iter().filter(|t| matches_filter(t, self.filter) && text(t, "name").to_lowercase().contains(&self.search.to_lowercase())).count())));
             });
             ui.add_space(6.0);
             if tasks.is_empty() {
@@ -1179,35 +1201,35 @@ impl eframe::App for DownloadApp {
                     if !self.connected {
                         if self.starting {
                             ui.spinner();
-                            ui.heading("正在准备下载引擎");
+                            ui.heading(crate::i18n::t("正在准备下载引擎"));
                         } else {
-                            ui.heading("下载引擎未能连接");
+                            ui.heading(crate::i18n::t("下载引擎未能连接"));
                         }
                         ui.add_space(8.0);
-                        ui.label(&self.message);
-                        ui.weak("任务列表将在引擎连接后加载；当前空白不代表任务已丢失。");
-                        if ui.button(if self.starting { "取消并重新启动" } else { "重试启动" }).clicked() {
+                        ui.label(crate::i18n::t(&self.message));
+                        ui.weak(crate::i18n::t("任务列表将在引擎连接后加载；当前空白不代表任务已丢失。"));
+                        if ui.button(crate::i18n::t(if self.starting { "取消并重新启动" } else { "重试启动" })).clicked() {
                             self.starting = true;
                             let _ = self.tx.send(Command::Retry);
                         }
-                        ui.weak("启动诊断保存在 data/startup.log。");
+                        ui.weak(crate::i18n::t("启动诊断保存在 data/startup.log。"));
                         return;
                     }
-                    ui.heading("从一个下载任务开始");
+                    ui.heading(crate::i18n::t("从一个下载任务开始"));
                     ui.add_space(8.0);
-                    ui.weak("添加磁力链接或本机种子文件，实时查看下载进度与连接诊断。");
+                    ui.weak(crate::i18n::t("添加磁力链接或本机种子文件，实时查看下载进度与连接诊断。"));
                     ui.add_space(15.0);
                     if ui
                         .add_enabled(
                             self.connected,
-                            egui::Button::new("＋ 新建下载任务").min_size(egui::vec2(160.0, 36.0)),
+                            egui::Button::new(crate::i18n::t("＋ 新建下载任务")).min_size(egui::vec2(160.0, 36.0)),
                         )
                         .clicked()
                     {
                         self.add_open = true;
                     }
                     ui.add_space(12.0);
-                    ui.weak("续传已有文件时，将保存目录设为原下载的根目录。");
+                    ui.weak(crate::i18n::t("续传已有文件时，将保存目录设为原下载的根目录。"));
                 });
             } else {
                 let mut row_rects = Vec::new();
@@ -1233,7 +1255,7 @@ impl eframe::App for DownloadApp {
                                     "做种",
                                     "分片覆盖",
                                 ] {
-                                    ui.strong(title);
+                                    ui.strong(crate::i18n::t(title));
                                 }
                                 ui.end_row();
                                 let filter = self.filter;
@@ -1276,24 +1298,24 @@ impl eframe::App for DownloadApp {
                                     }
                                     response.context_menu(|ui| {
                                         if self.selection.len() > 1 {
-                                            ui.label(format!("已选择 {} 个任务",self.selection.len()));
-                                            if ui.button("批量删除所选任务…").clicked() {self.open_remove();ui.close();}
+                                            ui.label(crate::i18n::t(format!("已选择 {} 个任务",self.selection.len())));
+                                            if ui.button(crate::i18n::t("批量删除所选任务…")).clicked() {self.open_remove();ui.close();}
                                             return;
                                         }
                                         let media_files=list(&t["media_files"]);
                                         let label=if media_files.len()>1 {"▶ 选择视频 / 音频播放…"} else if text(t,"kind")=="http" && num(t,"progress")<1.0 {"▶ 播放媒体直链"} else if num(t,"progress")<1.0 {"▶ 边下边播"} else {"▶ 播放"};
-                                        if ui.add_enabled(!media_files.is_empty(),egui::Button::new(label))
-                                            .on_hover_text(if media_files.is_empty() {"尚未识别到媒体文件，请等待元数据加载"} else {"自动识别 MP4、MKV 等音视频；BT 播放会继续下载，HTTP 未完成时直接播放原始媒体链接"})
+                                        if ui.add_enabled(!media_files.is_empty(),egui::Button::new(crate::i18n::t(label)))
+                                            .on_hover_text(crate::i18n::t(if media_files.is_empty() {"尚未识别到媒体文件，请等待元数据加载"} else {"自动识别 MP4、MKV 等音视频；BT 播放会继续下载，HTTP 未完成时直接播放原始媒体链接"}))
                                             .clicked() {self.play_task(t); ui.close();}
                                         ui.separator();
                                         if ui
                                             .add_enabled(
                                                 resumable || pausable,
-                                                egui::Button::new(if resumable {
+                                                egui::Button::new(crate::i18n::t(if resumable {
                                                     "继续下载"
                                                 } else {
                                                     "暂停任务"
-                                                }),
+                                                })),
                                             )
                                             .clicked()
                                         {
@@ -1304,27 +1326,27 @@ impl eframe::App for DownloadApp {
                                         if ui
                                             .add_enabled(
                                                 !text(t, "magnet").is_empty(),
-                                                egui::Button::new("复制磁力链接"),
+                                                egui::Button::new(crate::i18n::t("复制磁力链接")),
                                             )
                                             .clicked()
                                         {
                                             ui.ctx().copy_text(text(t, "magnet"));
                                             ui.close();
                                         }
-                                        if ui.button("复制原始链接 / 种子路径").clicked()
+                                        if ui.button(crate::i18n::t("复制原始链接 / 种子路径")).clicked()
                                         {
                                             ui.ctx().copy_text(text(t, "source"));
                                             ui.close();
                                         }
-                                        if ui.button("复制名称").clicked() {
+                                        if ui.button(crate::i18n::t("复制名称")).clicked() {
                                             ui.ctx().copy_text(text(t, "name"));
                                             ui.close();
                                         }
-                                        if ui.button("复制保存路径").clicked() {
+                                        if ui.button(crate::i18n::t("复制保存路径")).clicked() {
                                             ui.ctx().copy_text(text(t, "save_path"));
                                             ui.close();
                                         }
-                                        if ui.button("打开保存目录").clicked() {
+                                        if ui.button(crate::i18n::t("打开保存目录")).clicked() {
                                             match std::process::Command::new("explorer.exe")
                                                 .arg(text(t, "save_path"))
                                                 .spawn()
@@ -1340,35 +1362,35 @@ impl eframe::App for DownloadApp {
                                         if ui
                                             .add_enabled(
                                                 text(t, "kind") != "http",
-                                                egui::Button::new("校验文件"),
+                                                egui::Button::new(crate::i18n::t("校验文件")),
                                             )
                                             .clicked()
                                         {
                                             self.action("recheck");
                                             ui.close();
                                         }
-                                        if ui.button("删除任务…").clicked() {
+                                        if ui.button(crate::i18n::t("删除任务…")).clicked() {
                                             self.open_remove();
                                             ui.close();
                                         }
                                     });
-                                    ui.label(bytes(num(t, "total")));
+                                    ui.label(crate::i18n::t(bytes(num(t, "total"))));
                                     task_progress(ui, t);
-                                    ui.label(status(t));
-                                    ui.label(format!("{}/s", bytes(num(t, "download_rate"))));
-                                    ui.label(format!("{}/s", bytes(num(t, "upload_rate"))));
-                                    ui.label(format!("{:.0}", num(t, "peers")));
-                                    ui.label(if t["seeds"].is_number() {
+                                    ui.label(crate::i18n::t(status(t)));
+                                    ui.label(crate::i18n::t(format!("{}/s", bytes(num(t, "download_rate")))));
+                                    ui.label(crate::i18n::t(format!("{}/s", bytes(num(t, "upload_rate")))));
+                                    ui.label(crate::i18n::t(format!("{:.0}", num(t, "peers"))));
+                                    ui.label(crate::i18n::t(if t["seeds"].is_number() {
                                         format!("{:.0}", num(t, "seeds"))
                                     } else {
                                         "—".into()
-                                    });
-                                    let last_cell = ui.label(if num(t, "availability") < 0.0 {
+                                    }));
+                                    let last_cell = ui.label(crate::i18n::t(if num(t, "availability") < 0.0 {
                                         "—".into()
                                     } else {
                                         format!("{:.1}%", num(t, "availability") * 100.0)
-                                    });
-                                    last_cell.clone().on_hover_text("当前在线 BT 节点声明持有的所缺分片比例；不代表速度、实际传输或整个网络可用率。未知节点和 HTTP WebSeed 不计入；无可用声明或已完成时显示未知。");
+                                    }));
+                                    last_cell.clone().on_hover_text(crate::i18n::t("当前在线 BT 节点声明持有的所缺分片比例；不代表速度、实际传输或整个网络可用率。未知节点和 HTTP WebSeed 不计入；无可用声明或已完成时显示未知。"));
                                     row_rects.push((id, response.rect.union(last_cell.rect)));
                                     ui.end_row();
                                 }
@@ -1410,11 +1432,13 @@ impl eframe::App for DownloadApp {
         if let Some((id, files)) = self.media_choice.clone() {
             let mut open = true;
             let mut selected = None;
-            egui::Window::new("选择要播放的文件")
+            egui::Window::new(crate::i18n::t("选择要播放的文件"))
                 .open(&mut open)
                 .default_width(580.0)
                 .show(ctx, |ui| {
-                    ui.weak("已自动识别音视频文件，按大小排序。播放会继续相应 BT 任务。");
+                    ui.weak(crate::i18n::t(
+                        "已自动识别音视频文件，按大小排序。播放会继续相应 BT 任务。",
+                    ));
                     egui::ScrollArea::vertical()
                         .max_height(360.0)
                         .show(ui, |ui| {
@@ -1461,7 +1485,7 @@ impl eframe::App for DownloadApp {
                 }
             }
             let mut open = true;
-            egui::Window::new("新建下载任务")
+            egui::Window::new(crate::i18n::t("新建下载任务"))
                 .id(egui::Id::new("add-task-compact"))
                 .open(&mut open)
                 .collapsible(false)
@@ -1471,10 +1495,10 @@ impl eframe::App for DownloadApp {
                 .max_height((ctx.content_rect().height() - 80.0).max(160.0))
                 .vscroll(true)
                 .show(ctx, |ui| {
-                    ui.label("磁力链接 / HTTP(S) 直链 / 本机 .torrent 文件路径");
-                    if ui.button("选择种子文件…").clicked() {
+                    ui.label(crate::i18n::t("磁力链接 / HTTP(S) 直链 / 本机 .torrent 文件路径"));
+                    if ui.button(crate::i18n::t("选择种子文件…")).clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("种子", &["torrent"])
+                            .add_filter(crate::i18n::t("种子"), &["torrent"])
                             .pick_file()
                         {
                             self.source = path.display().to_string();
@@ -1492,26 +1516,26 @@ impl eframe::App for DownloadApp {
                         });
                     if !self.preview_files.is_empty() {
                         ui.horizontal(|ui| {
-                            ui.strong("选择下载文件");
-                            if ui.button("全选").clicked() { self.preview_selected = (0..self.preview_files.len()).collect(); }
-                            if ui.button("全不选").clicked() { self.preview_selected.clear(); }
+                            ui.strong(crate::i18n::t("选择下载文件"));
+                            if ui.button(crate::i18n::t("全选")).clicked() { self.preview_selected = (0..self.preview_files.len()).collect(); }
+                            if ui.button(crate::i18n::t("全不选")).clicked() { self.preview_selected.clear(); }
                         });
                         egui::ScrollArea::vertical().id_salt("new-task-files").max_height(230.0).show(ui, |ui| {
                             for (index, (name, size)) in self.preview_files.iter().enumerate() {
                                 let mut checked = self.preview_selected.contains(&index);
-                                if ui.checkbox(&mut checked, format!("{}  ({})", name, bytes(*size as f64))).changed() {
+                                if ui.checkbox(&mut checked, crate::i18n::t(format!("{}  ({})", name, bytes(*size as f64)))).changed() {
                                     if checked { self.preview_selected.insert(index); } else { self.preview_selected.remove(&index); }
                                 }
                             }
                         });
                         let size: u64 = self.preview_selected.iter().map(|i| self.preview_files[*i].1).sum();
-                        ui.label(format!("已选 {} / {} 个文件 · {}", self.preview_selected.len(), self.preview_files.len(), bytes(size as f64)));
-                        ui.weak("仅下载勾选文件；相邻文件可能写入共享分片。");
+                        ui.label(crate::i18n::t(format!("已选 {} / {} 个文件 · {}", self.preview_selected.len(), self.preview_files.len(), bytes(size as f64))));
+                        ui.weak(crate::i18n::t("仅下载勾选文件；相邻文件可能写入共享分片。"));
                     }
-                    if !self.preview_error.is_empty() { ui.colored_label(Color32::RED, &self.preview_error); }
-                    if self.source.trim().starts_with("magnet:?") { ui.weak("磁力链接：勾选“添加后暂停”，解析后在文件页选择并应用，再继续下载。"); }
-                    ui.label("保存目录");
-                    if ui.button("浏览目录…").clicked() {
+                    if !self.preview_error.is_empty() { ui.colored_label(Color32::RED, crate::i18n::t(&self.preview_error)); }
+                    if self.source.trim().starts_with("magnet:?") { ui.weak(crate::i18n::t("磁力链接：勾选“添加后暂停”，解析后在文件页选择并应用，再继续下载。")); }
+                    ui.label(crate::i18n::t("保存目录"));
+                    if ui.button(crate::i18n::t("浏览目录…")).clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .set_directory(&self.save_path)
                             .pick_folder()
@@ -1523,13 +1547,13 @@ impl eframe::App for DownloadApp {
                         egui::TextEdit::singleline(&mut self.save_path)
                             .desired_width(f32::INFINITY),
                     );
-                    ui.weak("可复用已有下载：选择原保存目录后，引擎会校验已有数据。");
-                    ui.checkbox(&mut self.add_paused, "添加后暂停（可在“文件”页选择下载内容）");
+                    ui.weak(crate::i18n::t("可复用已有下载：选择原保存目录后，引擎会校验已有数据。"));
+                    ui.checkbox(&mut self.add_paused, crate::i18n::t("添加后暂停（可在“文件”页选择下载内容）"));
                     ui.add_space(10.0);
                     if ui
                         .add_enabled(
                             self.connected && self.preview_source == self.source && self.preview_error.is_empty() && (self.preview_files.is_empty() || !self.preview_selected.is_empty()) && !self.source.trim().is_empty() && !self.save_path.trim().is_empty(),
-                            egui::Button::new("开始下载"),
+                            egui::Button::new(crate::i18n::t("开始下载")),
                         )
                         .clicked()
                     {
@@ -1544,10 +1568,10 @@ impl eframe::App for DownloadApp {
         }
         if self.peer_manager {
             let mut open = true;
-            egui::Window::new("节点记录与黑名单").open(&mut open).default_width(850.0).max_height((ctx.content_rect().height()-80.0).max(180.0)).vscroll(true).show(ctx, |ui| {
-                ui.label("传输参考分：持续收数 90，间歇收数 60，观察满一分钟暂无传输 10；新节点不打分。分数只反映本机近期观察，不证明恶意。");
-                ui.weak("记录最后一次观察的任务和会话累计收发；历史分数不代表当前状态。黑名单按 IP 作用于所有 BT 任务，重启后阻止进出连接；解除同样需重启。");
-                ui.checkbox(&mut self.only_blocked_peers, "只显示黑名单");
+            egui::Window::new(crate::i18n::t("节点记录与黑名单")).open(&mut open).default_width(850.0).max_height((ctx.content_rect().height()-80.0).max(180.0)).vscroll(true).show(ctx, |ui| {
+                ui.label(crate::i18n::t("传输参考分：持续收数 90，间歇收数 60，观察满一分钟暂无传输 10；新节点不打分。分数只反映本机近期观察，不证明恶意。"));
+                ui.weak(crate::i18n::t("记录最后一次观察的任务和会话累计收发；历史分数不代表当前状态。黑名单按 IP 作用于所有 BT 任务，重启后阻止进出连接；解除同样需重启。"));
+                ui.checkbox(&mut self.only_blocked_peers, crate::i18n::t("只显示黑名单"));
                 let mut records = list(&self.state["peer_records"]);
                 records.sort_by_key(|r| (!r["blocked"].as_bool().unwrap_or(false), std::cmp::Reverse(r["score"].as_u64().unwrap_or(0))));
                 for row in records.into_iter().filter(|r| !self.only_blocked_peers || r["blocked"] == true) {
@@ -1555,20 +1579,20 @@ impl eframe::App for DownloadApp {
                     let blocked = row["blocked"] == true;
                     ui.push_id(&ip, |ui| {
                         ui.horizontal(|ui| {
-                            ui.strong(&ip);
-                            ui.label(if row["score"].is_number() {format!("参考分 {}",row["score"])} else {"观察中 / 未评分".into()});
-                            ui.label(text(&row,"transfer_status"));
-                            ui.label(format!("接收 {} / 上传 {}",bytes(num(&row,"downloaded")),bytes(num(&row,"uploaded"))));
-                            if ui.button(if blocked {"解除黑名单"} else {"加入黑名单"}).clicked() { self.peer_policy_confirm = Some((ip.clone(), !blocked)); }
+                            ui.strong(crate::i18n::t(&ip));
+                            ui.label(crate::i18n::t(if row["score"].is_number() {format!("参考分 {}",row["score"])} else {"观察中 / 未评分".into()}));
+                            ui.label(crate::i18n::t(text(&row,"transfer_status")));
+                            ui.label(crate::i18n::t(format!("接收 {} / 上传 {}",bytes(num(&row,"downloaded")),bytes(num(&row,"uploaded")))));
+                            if ui.button(crate::i18n::t(if blocked {"解除黑名单"} else {"加入黑名单"})).clicked() { self.peer_policy_confirm = Some((ip.clone(), !blocked)); }
                         });
-                        if blocked != (row["active_block"] == true) { ui.colored_label(Color32::from_rgb(200,120,35), "连接规则待重启生效"); }
-                        else if blocked { ui.label("引擎正在屏蔽此 IP"); }
+                        if blocked != (row["active_block"] == true) { ui.colored_label(Color32::from_rgb(200,120,35), crate::i18n::t("连接规则待重启生效")); }
+                        else if blocked { ui.label(crate::i18n::t("引擎正在屏蔽此 IP")); }
                         ui.collapsing("详细记录", |ui| {
-                            ui.label(format!("客户端：{} · 地址：{}",text(&row,"client"),text(&row,"address")));
-                            ui.label(format!("近期均速：{}/s · 节点错误：{:.0} · 最后观察距今：{} 秒",bytes(num(&row,"recent_rate")),num(&row,"errors"),trackers::now().saturating_sub(row["last_seen"].as_u64().unwrap_or(0))));
-                            ui.label(format!("任务 ID：{} · 首次记录（Unix 秒）：{}",text(&row,"task"),row["first_seen"]));
-                            ui.label(format!("策略原因：{} · 修改时间（Unix 秒）：{}",text(&row,"reason"),row["policy_updated"]));
-                            if ui.button("复制完整记录").clicked() { ui.ctx().copy_text(serde_json::to_string_pretty(&row).unwrap_or_default()); }
+                            ui.label(crate::i18n::t(format!("客户端：{} · 地址：{}",text(&row,"client"),text(&row,"address"))));
+                            ui.label(crate::i18n::t(format!("近期均速：{}/s · 节点错误：{:.0} · 最后观察距今：{} 秒",bytes(num(&row,"recent_rate")),num(&row,"errors"),trackers::now().saturating_sub(row["last_seen"].as_u64().unwrap_or(0)))));
+                            ui.label(crate::i18n::t(format!("任务 ID：{} · 首次记录（Unix 秒）：{}",text(&row,"task"),row["first_seen"])));
+                            ui.label(crate::i18n::t(format!("策略原因：{} · 修改时间（Unix 秒）：{}",text(&row,"reason"),row["policy_updated"])));
+                            if ui.button(crate::i18n::t("复制完整记录")).clicked() { ui.ctx().copy_text(serde_json::to_string_pretty(&row).unwrap_or_default()); }
                         });
                         ui.separator();
                     });
@@ -1577,22 +1601,22 @@ impl eframe::App for DownloadApp {
             self.peer_manager = open;
         }
         if let Some((ip, blocked)) = self.peer_policy_confirm.clone() {
-            egui::Window::new("确认节点规则").collapsible(false).show(ctx, |ui| {
-                ui.label(format!("{} IP {}？作用于所有 BT 任务，可能影响共享同一 IP 的其他用户。重启 Flow 后生效。",if blocked {"屏蔽"} else {"解除屏蔽"},ip));
-                if ui.add_enabled(!self.pending_action,egui::Button::new("确认")).clicked() {
+            egui::Window::new(crate::i18n::t("确认节点规则")).collapsible(false).show(ctx, |ui| {
+                ui.label(crate::i18n::t(format!("{} IP {}？作用于所有 BT 任务，可能影响共享同一 IP 的其他用户。重启 Flow 后生效。",if blocked {"屏蔽"} else {"解除屏蔽"},ip)));
+                if ui.add_enabled(!self.pending_action,egui::Button::new(crate::i18n::t("确认"))).clicked() {
                     self.pending_action = true;
                     let _ = self.tx.send(Command::Post("/api/peer-policy", json!({"ip":ip,"blocked":blocked})));
                     self.peer_policy_confirm = None;
                 }
-                if ui.button("取消").clicked() { self.peer_policy_confirm = None; }
+                if ui.button(crate::i18n::t("取消")).clicked() { self.peer_policy_confirm = None; }
             });
         }
         if self.tracker_open {
             let mut open = true;
-            egui::Window::new("添加 Tracker").open(&mut open).default_width(550.0).show(ctx, |ui| {
-                ui.label("每行一个 http / https / udp 地址，最多 200 个");
+            egui::Window::new(crate::i18n::t("添加 Tracker")).open(&mut open).default_width(550.0).show(ctx, |ui| {
+                ui.label(crate::i18n::t("每行一个 http / https / udp 地址，最多 200 个"));
                 ui.add(egui::TextEdit::multiline(&mut self.trackers).desired_rows(10).desired_width(f32::INFINITY));
-                if ui.button("保存候选").clicked() {
+                if ui.button(crate::i18n::t("保存候选")).clicked() {
                     let _ = self.tx.send(Command::Post("/api/action",json!({"id":self.selected,"action":"trackers","trackers":self.trackers})));
                     self.tracker_open = false;
                 }
@@ -1601,12 +1625,17 @@ impl eframe::App for DownloadApp {
         }
         if self.remove_open {
             let mut open = true;
-            egui::Window::new("移除任务")
+            egui::Window::new(crate::i18n::t("移除任务"))
                 .open(&mut open)
                 .collapsible(false)
                 .show(ctx, |ui| {
-                    ui.label("删除任务及其本机任务记录。请选择如何处理下载数据：");
-                    ui.strong(format!("将移除 {} 个任务", self.remove_targets.len()));
+                    ui.label(crate::i18n::t(
+                        "删除任务及其本机任务记录。请选择如何处理下载数据：",
+                    ));
+                    ui.strong(crate::i18n::t(format!(
+                        "将移除 {} 个任务",
+                        self.remove_targets.len()
+                    )));
                     egui::ScrollArea::vertical()
                         .max_height(180.0)
                         .show(ui, |ui| {
@@ -1620,22 +1649,24 @@ impl eframe::App for DownloadApp {
                     ui.radio_value(
                         &mut self.remove_mode,
                         "keep".into(),
-                        "保留全部下载文件（默认）",
+                        crate::i18n::t("保留全部下载文件（默认）"),
                     );
                     ui.radio_value(
                         &mut self.remove_mode,
                         "incomplete".into(),
-                        "删除未完成文件 / HTTP 临时文件，保留完整文件",
+                        crate::i18n::t("删除未完成文件 / HTTP 临时文件，保留完整文件"),
                     );
                     ui.radio_value(
                         &mut self.remove_mode,
                         "all".into(),
-                        "删除此任务的全部数据文件（包括已完成文件）",
+                        crate::i18n::t("删除此任务的全部数据文件（包括已完成文件）"),
                     );
                     if self.remove_mode != "keep" {
                         ui.colored_label(
                             Color32::from_rgb(208, 89, 89),
-                            "文件将永久删除，不经过回收站；同目录其他文件不会删除。",
+                            crate::i18n::t(
+                                "文件将永久删除，不经过回收站；同目录其他文件不会删除。",
+                            ),
                         );
                     }
                     if ui
@@ -1659,17 +1690,18 @@ impl eframe::App for DownloadApp {
         if let Some(mut config) = self.settings_edit.take() {
             let mut open = true;
             let mut saved = false;
-            egui::Window::new("下载设置")
+            egui::Window::new(crate::i18n::t("下载设置"))
                 .open(&mut open)
                 .default_width(570.0)
                 .show(ctx, |ui| {
-                    ui.label("默认下载目录（仅影响新任务）");
+                    ui.horizontal(|ui| {ui.label(crate::i18n::t("语言 / Language"));crate::i18n::selector(ui,"settings-language");});
+                    ui.label(crate::i18n::t("默认下载目录（仅影响新任务）"));
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut config.download_dir)
                                 .desired_width(430.0),
                         );
-                        if ui.button("浏览…").clicked() {
+                        if ui.button(crate::i18n::t("浏览…")).clicked() {
                             if let Some(path) = rfd::FileDialog::new()
                                 .set_directory(&config.download_dir)
                                 .pick_folder()
@@ -1679,44 +1711,44 @@ impl eframe::App for DownloadApp {
                         }
                     });
                     ui.separator();
-                    ui.label("全局限速，0 表示不限速；保存后立即生效。");
+                    ui.label(crate::i18n::t("全局限速，0 表示不限速；保存后立即生效。"));
                     ui.checkbox(
                         &mut config.seed_after_download,
-                        "下载完成后继续做种（默认关闭）",
+                        crate::i18n::t("下载完成后继续做种（默认关闭）"),
                     );
-                    ui.weak("关闭后自动停止已完成任务的上传；下载过程中仍可能上传已有分片。");
+                    ui.weak(crate::i18n::t("关闭后自动停止已完成任务的上传；下载过程中仍可能上传已有分片。"));
                     ui.checkbox(
                         &mut config.background_on_close,
-                        "关闭窗口后在系统托盘继续下载",
+                        crate::i18n::t("关闭窗口后在系统托盘继续下载"),
                     );
-                    ui.weak("托盘双击显示窗口；托盘菜单“退出并停止下载”会保存状态并退出。");
-                    ui.checkbox(&mut config.clipboard_watch, "复制磁力链接时弹出新建任务（包括网页中嵌入的磁力地址）");
-                    if ui.button("软件更新 / 镜像代理…").clicked() { self.updater.open = true; }
-                    if ui.button("节点记录 / 黑名单管理…").clicked() { self.peer_manager = true; }
-                    if ui.button("关联 .torrent 文件（双击用 Flow 打开）").clicked() {
+                    ui.weak(crate::i18n::t("托盘双击显示窗口；托盘菜单“退出并停止下载”会保存状态并退出。"));
+                    ui.checkbox(&mut config.clipboard_watch, crate::i18n::t("复制磁力链接时弹出新建任务（包括网页中嵌入的磁力地址）"));
+                    if ui.button(crate::i18n::t("软件更新 / 镜像代理…")).clicked() { self.updater.open = true; }
+                    if ui.button(crate::i18n::t("节点记录 / 黑名单管理…")).clicked() { self.peer_manager = true; }
+                    if ui.button(crate::i18n::t("关联 .torrent 文件（双击用 Flow 打开）")).clicked() {
                         self.message = match open_request::register_associations() {
                             Ok(()) => "已注册种子关联。如系统已有默认应用，请右键种子 → 打开方式 → Flow → 始终使用。".into(),
                             Err(error) => format!("关联失败：{error}"),
                         };
                     }
-                    ui.weak("仅在本机识别，不访问分享网页；确认后才开始下载。Flow 需保持运行或驻留托盘。");
+                    ui.weak(crate::i18n::t("仅在本机识别，不访问分享网页；确认后才开始下载。Flow 需保持运行或驻留托盘。"));
                     ui.horizontal(|ui| {
-                        ui.label("下载 KiB/s");
+                        ui.label(crate::i18n::t("下载 KiB/s"));
                         ui.add(egui::DragValue::new(&mut config.download_kib).range(0..=4_000_000));
                     });
                     ui.horizontal(|ui| {
-                        ui.label("上传 KiB/s");
+                        ui.label(crate::i18n::t("上传 KiB/s"));
                         ui.add(egui::DragValue::new(&mut config.upload_kib).range(0..=4_000_000));
                     });
                     ui.horizontal(|ui| {
-                        ui.label("连接上限（重启后生效）");
+                        ui.label(crate::i18n::t("连接上限（重启后生效）"));
                         ui.add(egui::DragValue::new(&mut config.peer_limit).range(10..=2000));
                     });
                     if let Err(e) = config.validate() {
-                        ui.colored_label(Color32::from_rgb(208, 89, 89), e.to_string());
+                        ui.colored_label(Color32::from_rgb(208, 89, 89), crate::i18n::t(e.to_string()));
                     }
                     if ui
-                        .add_enabled(config.validate().is_ok(), egui::Button::new("保存设置"))
+                        .add_enabled(config.validate().is_ok(), egui::Button::new(crate::i18n::t("保存设置")))
                         .clicked()
                     {
                         let _ = self.tx.send(Command::Post(
@@ -1733,11 +1765,11 @@ impl eframe::App for DownloadApp {
         if let Some(mut config) = self.subscription_edit.take() {
             let mut open = true;
             let mut saved = false;
-            egui::Window::new("Tracker 订阅设置").open(&mut open).default_width(660.0).show(ctx, |ui| {
-                ui.label("同一来源的镜像按顺序尝试；全部失败时沿用缓存。");
+            egui::Window::new(crate::i18n::t("Tracker 订阅设置")).open(&mut open).default_width(660.0).show(ctx, |ui| {
+                ui.label(crate::i18n::t("同一来源的镜像按顺序尝试；全部失败时沿用缓存。"));
                 ui.horizontal(|ui| {
-                    ui.label("列表更新（小时）"); ui.add(egui::DragValue::new(&mut config.refresh_hours).range(1..=168));
-                    ui.label("健康检查（分钟）"); ui.add(egui::DragValue::new(&mut config.health_minutes).range(5..=1440));
+                    ui.label(crate::i18n::t("列表更新（小时）")); ui.add(egui::DragValue::new(&mut config.refresh_hours).range(1..=168));
+                    ui.label(crate::i18n::t("健康检查（分钟）")); ui.add(egui::DragValue::new(&mut config.health_minutes).range(5..=1440));
                 });
                 let mut remove = None;
                 egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
@@ -1745,12 +1777,12 @@ impl eframe::App for DownloadApp {
                         ui.push_id(index, |ui| {
                             ui.separator();
                             ui.horizontal(|ui| {
-                                ui.checkbox(&mut source.enabled, "启用");
+                                ui.checkbox(&mut source.enabled, crate::i18n::t("启用"));
                                 ui.text_edit_singleline(&mut source.name);
                                 if ui.small_button("移除订阅").clicked() { remove = Some(index); }
                             });
                             let mut urls = source.urls.join("\n");
-                            ui.label("镜像地址，每行一个");
+                            ui.label(crate::i18n::t("镜像地址，每行一个"));
                             if ui.add(egui::TextEdit::multiline(&mut urls).desired_rows(3).desired_width(f32::INFINITY)).changed() {
                                     source.urls = urls.split('\n').map(str::to_string).collect();
                             }
@@ -1758,12 +1790,12 @@ impl eframe::App for DownloadApp {
                     }
                 });
                 if let Some(index) = remove { config.sources.remove(index); }
-                if config.sources.len() < 16 && ui.button("新增订阅源").clicked() {
+                if config.sources.len() < 16 && ui.button(crate::i18n::t("新增订阅源")).clicked() {
                     config.sources.push(subscriptions::Source { name: format!("自定义 {}", config.sources.len() + 1), enabled: true, urls: vec![String::new()] });
                 }
-                ui.weak("后台检查不会中断下载。新候选通过“应用候选”载入引擎；移除订阅不会删除任务原有 Tracker。");
-                if let Err(e) = config.validate() { ui.colored_label(Color32::from_rgb(208,89,89), e.to_string()); }
-                if ui.add_enabled(config.validate().is_ok(), egui::Button::new("保存设置")).clicked() {
+                ui.weak(crate::i18n::t("后台检查不会中断下载。新候选通过“应用候选”载入引擎；移除订阅不会删除任务原有 Tracker。"));
+                if let Err(e) = config.validate() { ui.colored_label(Color32::from_rgb(208,89,89), crate::i18n::t(e.to_string())); }
+                if ui.add_enabled(config.validate().is_ok(), egui::Button::new(crate::i18n::t("保存设置"))).clicked() {
                     let _ = self.tx.send(Command::Post("/api/subscriptions", serde_json::to_value(&config).unwrap()));
                     saved = true;
                 }
@@ -1829,6 +1861,9 @@ mod task_filter_tests {
 }
 
 fn main() -> eframe::Result {
+    if let Ok(root) = backend::Backend::root() {
+        i18n::initialize(&root);
+    }
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|s| s == "--apply-update") {
         if let Err(error) = updater::apply_update(&args) {
@@ -1900,6 +1935,7 @@ fn main() -> eframe::Result {
         backend::Backend::root().unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_title(i18n::t("Flow · 下载工作台"))
             .with_icon(
                 eframe::icon_data::from_png_bytes(include_bytes!("../assets/flow-icon.png"))
                     .expect("embedded app icon"),

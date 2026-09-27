@@ -1,0 +1,417 @@
+校验中|Checking
+恢复中|Restoring
+错误|Error
+已完成|Completed
+已暂停|Paused
+做种中|Seeding
+下载中|Downloading
+载入中|Loading
+等待数据|Waiting for data
+等待来源|Waiting for sources
+正在启动下载引擎…|Starting download engine…
+此项目已有下载引擎运行|An engine is already running for this installation
+正在初始化引擎…|Initializing engine…
+{id}: {e}（未自动重试，请刷新后确认结果）|{id}: {e} (not retried automatically; refresh to verify)
+已移除 {total} 个任务|Removed {total} tasks
+{total} 个任务中有 {} 项未能确认删除：{}|Of {total} tasks, {} removals could not be verified: {}
+引擎仍在运行，状态刷新暂时失败，正在自动重试。{e}|Engine is running; status refresh failed temporarily. Retrying. {e}
+引擎暂时无响应，正在自动重连。{e}|Engine is temporarily unresponsive. Reconnecting. {e}
+正在准备播放文件…|Preparing media…
+显示全部任务合计|Show totals for all tasks
+最近 5 分钟 · 绿色：下载，紫色：上传 · 仅保留本次运行数据|Last 5 minutes · Green: download; purple: upload · Current session only
+−5 分钟|−5 minutes
+现在|Now
+概览|Overview
+文件|Files
+对等连接|Peers
+诊断日志|Diagnostics
+速度曲线|Speed history
+复制当前诊断 JSON|Copy diagnostic JSON
+诊断已复制到剪贴板（包含本机路径和对等连接地址）|Diagnostics copied (includes local paths and peer addresses)
+总大小|Total size
+下载速度|Download speed
+上传速度|Upload speed
+已连接用户|Connected peers
+已连接做种者|Connected seeders
+未知|Unknown
+缺失分片覆盖|Missing-piece coverage
+{:.1}%（在线节点声明）|{:.1}% (online peer claims)
+引擎状态|Engine state
+保存位置：{}|Save location: {}
+所缺分片 {:.0}，在线节点声明覆盖 {:.0}；已知声明节点 {:.0}，未知声明节点 {:.0}。只表示在线声明，不保证传输。|Missing pieces: {:.0}; claimed coverage: {:.0}; known declarations: {:.0}; unknown: {:.0}. Claims do not guarantee delivery.
+HTTP WebSeed · {} 个候选|HTTP WebSeed · {} candidates
+HTTP 候选不计入 BT 节点数或资源可用率；验证字节是本次来源传输记录，不是任务完成度。|HTTP candidates are excluded from BT counts and coverage. Verified bytes describe transfers, not task progress.
+正在请求并校验分片|Requesting and verifying pieces
+错误数据 / 范围已隔离|Bad data / range response isolated
+请求失败，退避等待|Request failed; waiting to retry
+已有校验通过的传输|Verified transfer observed
+尚未验证|Not yet verified
+{status} · 校验通过 {} · 失败 {} 次|{status} · Verified: {} · Failures: {}
+默认完成后停止做种；可在设置中开启完成后继续做种。未知指标表示引擎没有公开该数据；Tracker 做种统计可在 Tracker 页查看。|Seeding stops on completion by default. Enable continued seeding in Settings. Unknown metrics are unavailable; Tracker reports appear in the Tracker tab.
+全选|Select all
+清空选择|Clear selection
+应用文件选择|Apply file selection
+至少选择一个文件|Select at least one file
+取消勾选不删除已有数据；相邻文件可能保留共享分块。新建时可勾选“添加后暂停”再选择文件。|Deselecting preserves data. Neighboring files may contain shared pieces. Add paused to choose files first.
+下载|Download
+文件路径|File path
+大小|Size
+完成度|Progress
+▶ 播放|▶ Play
+选择此文件并继续下载，边下边播|Select this file, resume downloading and stream
+HTTP 直链任务不使用 Tracker。|HTTP tasks do not use Trackers.
+正在发现…|Discovering…
+发现与查询统计|Discover and query
+添加 Tracker…|Add Tracker…
+订阅设置…|Subscriptions…
+重新查询|Query again
+应用候选（重新校验）|Apply candidates (recheck)
+这里只展示 Tracker 查询结果，不能证明有人给你上传。实际收数与持续性请看“对等连接”；不同 Tracker 报告人数不可相加。|Tracker responses do not prove delivery. See Peers for transfers. Counts from different Trackers cannot be added together.
+Tracker 地址|Tracker URL
+服务器报告做种数|Reported seeders
+查询耗时|Query latency
+查询成功 / 失败|Success / failure
+列表来源|List source
+查询状态|Query status
+响应 / 错误原因|Response / error
+节点记录 / 黑名单管理…|Peer records / blocklist…
+排序：持续收数 → 间歇收数 → 新节点观察 → 暂无有效传输。每 10 秒采样，连续 3 次收数才算持续；无数据降序，不自动封禁。此顺序也用于重连候选缓存，不代表强制带宽分配。|Order: sustained → intermittent → observing → no recent transfer. Samples every 10 seconds; three consecutive transfers qualify as sustained. Idle peers rank lower without automatic bans. This also orders reconnect candidates; it does not allocate bandwidth.
+地址|Address
+客户端|Client
+累计接收|Received
+累计上传|Uploaded
+近期接收均速|Recent receive rate
+传输观察|Transfer observation
+连接状态|Connection state
+距开始观察或上次收数 {:.0} 秒|{:.0} seconds since observation began or last data
+对端允许传输：{}；等待响应的数据块：{}|Peer permits downloading: {}; outstanding blocks: {}
+否（choke）|No (choked)
+是|Yes
+选择一个任务，查看文件、Tracker 和连接详情。|Select a task to view files, Trackers and peers.
+无法导入：{error}|Import failed: {error}
+正在移除任务 {index}/{total}…|Removing task {index}/{total}…
+引擎仍在运行|Engine is running
+引擎暂时无响应|Engine is temporarily unresponsive
+内置引擎连接失败|Embedded engine connection failed
+操作成功|Operation completed
+下载工作台|Download workspace
+＋ 新建任务|＋ New task
+播放器…|Player…
+退出程序|Exit
+停止下载并完全退出，包括后台引擎|Stop downloads and exit, including the background engine
+▶ 继续|▶ Resume
+Ⅱ 暂停|Ⅱ Pause
+校验文件|Recheck files
+移除任务|Remove task
+设置…|Settings…
+更新…|Updates…
+深色|Dark
+搜索任务…|Search tasks…
+● 引擎已连接|● Engine connected
+● 引擎启动中|● Engine starting
+● 引擎未连接|● Engine disconnected
+重试启动|Retry startup
+监听端口 {}|Listening port {}
+清除|Clear
+任务分类|Categories
+全部任务|All tasks
+本机下载引擎|Local download engine
+自动保存续传状态\nCtrl + 左键：多选任务\n右键 / Delete：批量删除\n空格：暂停 / 继续|Resume state saved automatically\nCtrl + click: select tasks\nRight-click / Delete: batch remove\nSpace: pause / resume
+已选 {} 项|{} selected
+{} 个任务|{} tasks
+正在准备下载引擎|Preparing download engine
+下载引擎未能连接|Download engine unavailable
+任务列表将在引擎连接后加载；当前空白不代表任务已丢失。|Tasks appear when the engine connects. An empty view does not mean tasks were lost.
+取消并重新启动|Cancel and restart
+启动诊断保存在 data/startup.log。|Startup diagnostics are saved in data/startup.log.
+从一个下载任务开始|Start with a download
+添加磁力链接或本机种子文件，实时查看下载进度与连接诊断。|Add a magnet or torrent file to view progress and connection diagnostics.
+＋ 新建下载任务|＋ New download
+续传已有文件时，将保存目录设为原下载的根目录。|To resume existing files, choose the original download root directory.
+名称|Name
+进度|Progress
+状态|Status
+连接|Peers
+做种|Seeders
+分片覆盖|Piece coverage
+已选择 {} 个任务|{} tasks selected
+批量删除所选任务…|Remove selected tasks…
+▶ 选择视频 / 音频播放…|▶ Choose media to play…
+▶ 播放媒体直链|▶ Play media URL
+▶ 边下边播|▶ Stream while downloading
+尚未识别到媒体文件，请等待元数据加载|No media identified yet; wait for metadata
+自动识别 MP4、MKV 等音视频；BT 播放会继续下载，HTTP 未完成时直接播放原始媒体链接|Recognizes MP4, MKV and other media. BT playback resumes downloading; incomplete HTTP media plays from its original URL.
+继续下载|Resume download
+暂停任务|Pause task
+复制磁力链接|Copy magnet link
+复制原始链接 / 种子路径|Copy original URL / torrent path
+复制名称|Copy name
+复制保存路径|Copy save path
+打开保存目录|Open download folder
+无法打开目录：{e}|Cannot open folder: {e}
+删除任务…|Remove task…
+当前在线 BT 节点声明持有的所缺分片比例；不代表速度、实际传输或整个网络可用率。未知节点和 HTTP WebSeed 不计入；无可用声明或已完成时显示未知。|Fraction of missing pieces claimed by online BT peers. Not speed, delivery or global availability. Unknown peers and HTTP WebSeeds are excluded; completed tasks or no declarations show unknown.
+选择要播放的文件|Choose media
+已自动识别音视频文件，按大小排序。播放会继续相应 BT 任务。|Media is sorted by size. Playback resumes the corresponding BT task.
+无法解析种子：{error}|Cannot parse torrent: {error}
+新建下载任务|New download
+磁力链接 / HTTP(S) 直链 / 本机 .torrent 文件路径|Magnet link / HTTP(S) URL / local .torrent path
+选择种子文件…|Choose torrent…
+种子|Torrent
+选择下载文件|Choose files to download
+全不选|Select none
+已选 {} / {} 个文件 · {}|Selected {} / {} files · {}
+仅下载勾选文件；相邻文件可能写入共享分片。|Downloads selected files only; neighbors may contain shared pieces.
+磁力链接：勾选“添加后暂停”，解析后在文件页选择并应用，再继续下载。|For magnets: add paused, choose files after metadata resolves, apply and resume.
+保存目录|Save directory
+浏览目录…|Browse folder…
+可复用已有下载：选择原保存目录后，引擎会校验已有数据。|Choose the original directory to verify and reuse existing data.
+添加后暂停（可在“文件”页选择下载内容）|Add paused (choose content in Files)
+开始下载|Start download
+节点记录与黑名单|Peer records and blocklist
+传输参考分：持续收数 90，间歇收数 60，观察满一分钟暂无传输 10；新节点不打分。分数只反映本机近期观察，不证明恶意。|Reference scores: sustained 90, intermittent 60, no transfer after one minute 10. New peers are unscored. Local observations do not prove malicious intent.
+记录最后一次观察的任务和会话累计收发；历史分数不代表当前状态。黑名单按 IP 作用于所有 BT 任务，重启后阻止进出连接；解除同样需重启。|Records last observed task and session totals; historical scores are not current state. IP blocking applies to all BT tasks. Blocking and unblocking require restart.
+只显示黑名单|Blocked peers only
+参考分 {}|Reference score {}
+观察中 / 未评分|Observing / unscored
+接收 {} / 上传 {}|Received {} / uploaded {}
+解除黑名单|Unblock
+加入黑名单|Block
+连接规则待重启生效|Rules apply after restart
+引擎正在屏蔽此 IP|Engine is blocking this IP
+详细记录|Details
+客户端：{} · 地址：{}|Client: {} · Address: {}
+近期均速：{}/s · 节点错误：{:.0} · 最后观察距今：{} 秒|Recent rate: {}/s · Peer errors: {:.0} · Last seen: {} seconds ago
+任务 ID：{} · 首次记录（Unix 秒）：{}|Task ID: {} · First seen (Unix seconds): {}
+策略原因：{} · 修改时间（Unix 秒）：{}|Policy reason: {} · Modified (Unix seconds): {}
+复制完整记录|Copy full record
+确认节点规则|Confirm peer rule
+{} IP {}？作用于所有 BT 任务，可能影响共享同一 IP 的其他用户。重启 Flow 后生效。|{} IP {}? Applies to all BT tasks and may affect others sharing this IP. Takes effect after restart.
+屏蔽|Block
+解除屏蔽|Unblock
+确认|Confirm
+取消|Cancel
+添加 Tracker|Add Tracker
+每行一个 http / https / udp 地址，最多 200 个|One HTTP / HTTPS / UDP URL per line; up to 200
+保存候选|Save candidates
+删除任务及其本机任务记录。请选择如何处理下载数据：|Remove the task and its local record. Choose what to do with downloaded data:
+将移除 {} 个任务|Removing {} tasks
+保留全部下载文件（默认）|Keep all downloaded files (default)
+删除未完成文件 / HTTP 临时文件，保留完整文件|Delete incomplete / HTTP temporary files; keep complete files
+删除此任务的全部数据文件（包括已完成文件）|Delete all task data, including completed files
+文件将永久删除，不经过回收站；同目录其他文件不会删除。|Files are permanently deleted without the Recycle Bin. Other files are preserved.
+确认移除，保留文件|Remove task, keep files
+确认移除并删除所选范围的文件|Remove task and delete chosen files
+下载设置|Download settings
+默认下载目录（仅影响新任务）|Default directory (new tasks only)
+浏览…|Browse…
+全局限速，0 表示不限速；保存后立即生效。|Global limits: 0 means unlimited. Applied immediately after saving.
+下载完成后继续做种（默认关闭）|Keep seeding after completion (off by default)
+关闭后自动停止已完成任务的上传；下载过程中仍可能上传已有分片。|When off, completed tasks stop uploading. Existing pieces may still upload during download.
+关闭窗口后在系统托盘继续下载|Continue in the tray when the window closes
+托盘双击显示窗口；托盘菜单“退出并停止下载”会保存状态并退出。|Double-click the tray icon to show Flow. Exit and stop downloads saves state and exits.
+复制磁力链接时弹出新建任务（包括网页中嵌入的磁力地址）|Prompt for copied magnets, including magnets embedded in web URLs
+软件更新 / 镜像代理…|Updates / mirror proxy…
+关联 .torrent 文件（双击用 Flow 打开）|Associate .torrent files (double-click to open in Flow)
+已注册种子关联。如系统已有默认应用，请右键种子 → 打开方式 → Flow → 始终使用。|Association registered. If another default exists: right-click a torrent → Open with → Flow → Always use.
+关联失败：{error}|Association failed: {error}
+仅在本机识别，不访问分享网页；确认后才开始下载。Flow 需保持运行或驻留托盘。|Detected locally without visiting sharing pages. Starts after confirmation. Flow must be running or in the tray.
+下载 KiB/s|Download KiB/s
+上传 KiB/s|Upload KiB/s
+连接上限（重启后生效）|Peer limit (requires restart)
+保存设置|Save settings
+Tracker 订阅设置|Tracker subscriptions
+同一来源的镜像按顺序尝试；全部失败时沿用缓存。|Mirrors are tried in order; cached lists are reused if all fail.
+列表更新（小时）|Refresh lists (hours)
+健康检查（分钟）|Health checks (minutes)
+启用|Enabled
+移除订阅|Remove subscription
+镜像地址，每行一个|Mirror URLs, one per line
+新增订阅源|Add subscription
+自定义 {}|Custom {}
+后台检查不会中断下载。新候选通过“应用候选”载入引擎；移除订阅不会删除任务原有 Tracker。|Background checks do not interrupt downloads. Apply candidates to load sources. Removing subscriptions preserves task Trackers.
+Flow · 下载工作台|Flow · Download workspace
+缺少播放内核，请点击安装播放器|Player runtime is missing; install the player
+--title=Flow · 视频|--title=Flow · Video
+请选择本地媒体或输入 HTTP(S) 媒体直链。磁力链接请先添加下载任务，再在文件页播放。|Choose local media or an HTTP(S) URL. Add magnets as tasks, then play from Files.
+正在准备播放内核…|Preparing player runtime…
+播放器安装中断，请重试|Player installation interrupted; retry
+播放失败：{}|Playback failed: {}
+无法读取媒体，检查来源或缓冲状态|Cannot read media; check source or buffering
+播放控制失败：{error}|Playback control failed: {error}
+视频窗口已关闭|Video window closed
+Flow 播放器|Flow player
+打开文件…|Open file…
+本地文件路径 / HTTP(S) 媒体直链|Local media path / HTTP(S) media URL
+播放|Play
+首次播放会自动下载并校验 mpv，完成后继续播放；不需要运行脚本。|First playback downloads and verifies mpv, then continues. No script required.
+安装完成后不自动播放|Do not autoplay after installation
+播放器尚未安装。首次播放也会自动配置。|Player not installed. First playback can set it up automatically.
+安装 / 重试安装播放器|Install / retry player setup
+正在缓冲 · 等待播放所需数据|Buffering · Waiting for media data
+播放结束|Playback ended
+已暂停播放|Playback paused
+播放内核已连接|Player connected
+打开媒体开始播放|Open media to start playing
+{} / {}    已缓冲 {:.1} 秒|{} / {}    Buffered: {:.1} seconds
+−10 秒|−10 seconds
+停止|Stop
++10 秒|+10 seconds
+全屏|Fullscreen
+音量|Volume
+加载字幕…|Load subtitles…
+字幕|Subtitles
+关闭字幕|Disable subtitles
+音轨|Audio track
+视频在独立窗口显示。画面窗口：移动鼠标显示进度条，可拖动跳转、点击暂停和调音量；空格暂停，F 全屏。关闭此控制面板不停止播放。停止播放不会暂停下载任务。|Video opens separately. Move the mouse for seek, pause and volume; Space pauses, F toggles fullscreen. Closing this panel does not stop playback. Stopping playback does not pause downloads.
+Windows 目录不可用|Windows directory unavailable
+注册安装信息失败：{}|Cannot register installation: {}
+快捷方式操作失败：{}|Shortcut operation failed: {}
+创建卸载程序失败|Cannot create uninstaller
+请选择绝对安装路径|Choose an absolute installation path
+不能安装到磁盘根目录|Cannot install at a drive root
+此目录的 Flow 正在运行，请先从托盘退出|Flow is running in this directory; exit it from the tray first
+卸载已安排；关闭后移除程序，保留下载和个人数据。|Uninstall scheduled. Close to remove the program; downloads and personal data are preserved.
+安装完成|Installation complete
+卸载 Flow|Uninstall Flow
+安装 Flow {version}|Install Flow {version}
+仅移除程序和快捷方式，保留 data、runtime 及下载文件。|Only removes the program and shortcuts. Data, runtime and downloads are preserved.
+为当前 Windows 用户安装，无需管理员权限。|Installs for the current Windows user; no administrator rights required.
+选择目录…|Choose folder…
+创建桌面快捷方式|Create desktop shortcut
+确认卸载|Confirm uninstall
+安装|Install
+正在处理…|Working…
+启动 Flow|Launch Flow
+关闭|Close
+没有找到 Flow 安装记录|Flow installation record not found
+Flow 仍在运行，请先从托盘退出|Flow is still running; exit it from the tray first
+缺少目录|Missing directory
+卸载目录无效|Invalid uninstall directory
+缺少进程|Missing process
+Flow 正在运行|Flow is running
+签名格式错误|Invalid signature format
+版本格式错误|Invalid version format
+更新公钥无效|Invalid update public key
+更新签名无效，已拒绝更新|Invalid update signature; update rejected
+更新地址无效|Invalid update URL
+更新校验值无效|Invalid update checksum
+更新文件大小无效|Invalid update size
+镜像前缀必须是无账号、无查询参数的 HTTPS 地址|Mirror prefix must be HTTPS without credentials or query parameters
+更新清单过大|Update manifest is too large
+检查失败：{}|Update check failed: {}
+下载文件超过签名清单的大小|Download exceeds signed manifest size
+正在下载 {:.1} / {:.1} MiB|Downloading {:.1} / {:.1} MiB
+更新文件校验失败|Update verification failed
+下载失败，可重试：{}|Download failed; retry: {}
+正在检查更新…|Checking for updates…
+正在准备下载…|Preparing download…
+发现新版本 {}|New version available: {}
+当前已是最新版本|You are up to date
+签名和文件校验通过，可以安装更新|Signature and file verified; ready to install
+软件更新|Software updates
+启动时自动检查更新（安装前需确认）|Check on startup (confirm before installing)
+GitHub 镜像代理前缀（留空直连官方）|GitHub mirror proxy prefix (blank for direct access)
+https://你的代理域名/|https://your-proxy.example/
+代理需支持 前缀/https://github.com/… 格式及 Releases 文件；配置代理时优先使用，失败回退官方。始终验证内置公钥签名和 SHA-256。|Proxy must support prefix/https://github.com/… and release assets. Try proxy first, then GitHub. Signatures and SHA-256 are always verified.
+保存更新设置|Save update settings
+更新设置已保存|Update settings saved
+检查更新|Check for updates
+下载新版|Download update
+安装会停止当前下载并退出，替换程序后自动重开。保留 data、runtime 和下载文件；旧 EXE 保存在更新备份目录。|Stops downloads and exits, then restarts Flow. Data, runtime and downloads are preserved; the old executable is backed up.
+退出并安装更新|Exit and install update
+打开 GitHub 发布页|Open GitHub releases
+更新文件大小不符|Update size mismatch
+更新目录无效|Invalid update directory
+更新助手目录无效|Invalid update helper directory
+程序目录无效|Invalid program directory
+拒绝降级或重复更新|Downgrades and duplicate updates rejected
+缺少父进程|Missing parent process
+仍有 Flow 实例运行，更新取消|Flow is still running; update cancelled
+无法备份旧版程序|Cannot back up previous executable
+已更新至 {}，旧版备份：{}|Updated to {}; previous executable backed up at: {}
+等待旧版退出超时，请手动退出后重试|Timed out waiting for Flow to exit; exit manually and retry
+无法确认旧版进程已退出|Cannot verify that previous process exited
+更新失败：{message}|Update failed: {message}
+显示 Flow|Show Flow
+退出并停止下载|Exit and stop downloads
+Flow · 双击显示窗口 / 右键退出|Flow · Double-click to show / right-click to exit
+无法定位程序目录|Cannot locate program directory
+Rust 下载引擎启动超时|Rust download engine startup timed out
+引擎初始化线程意外退出，请查看启动日志|Engine initialization stopped unexpectedly; check startup logs
+启动失败：{e:#}|Startup failed: {e:#}
+播放器安装包超过大小限制|Player archive exceeds size limit
+正在下载播放内核：{:.1} MiB{}|Downloading player runtime: {:.1} MiB{}
+播放器安装包校验失败，请重试|Player archive verification failed; retry
+无法创建播放器目录，请检查目录权限|Cannot create player directory; check permissions
+另一窗口正在安装播放器，请稍后重试|Another window is installing the player; retry later
+正在连接播放器下载源…|Connecting to player download source…
+校验通过，正在配置播放器…|Verified; setting up player…
+找不到 Windows 系统目录|Cannot find Windows system directory
+无法启动系统解压工具（需要 Windows 10/11）|Cannot start system archive tool (Windows 10/11 required)
+播放器解压失败，请重试|Player extraction failed; retry
+播放器解压超时，请重试|Player extraction timed out; retry
+安装包中未找到播放内核|Player runtime not found in archive
+无法替换旧播放器目录，请关闭视频窗口后重试|Cannot replace player directory; close video window and retry
+校验失败|Verification failed
+自动（跟随系统）|Automatic (system)
+语言 / Language|Language / 语言
+持续收数|Sustained transfer
+间歇收数|Intermittent transfer
+观察中|Observing
+暂无有效传输|No recent transfer
+已断开 · 曾有效传输|Disconnected · Previously transferred data
+响应正常|Response OK
+查询失败|Query failed
+原有配置|Original configuration
+报告 {seeds} 个做种者、{peers} 个下载者（非已连接人数）|Reported {seeds} seeders and {peers} downloaders (not connected peers)
+8 秒超时；不代表 announce 一定不可用|8-second query timeout; announce may still work
+不支持标准 scrape，仍可能可用于下载|Standard scrape unsupported; may still work for downloading
+未提供本资源 scrape 数据|No scrape data for this resource
+此 Tracker 未返回该哈希的数据|Tracker returned no data for this hash
+任务已暂停|Task paused
+HTTP 下载完成|HTTP download complete
+已暂停，临时文件保留|Paused; temporary file preserved
+HTTP 传输中；支持续传的服务器将复用临时文件|HTTP transfer active; resume-capable servers reuse temporary data
+磁力任务 · 等待元数据|Magnet task · Waiting for metadata
+正在解析元数据或载入任务|Resolving metadata or loading task
+已完成，已停止做种（已保存的完成状态；需要重新验证文件时点击校验文件）|Completed; seeding stopped (saved state; use Recheck files to verify again)
+校验已有文件 {:.1}%（不是下载完成度）|Checking existing files: {:.1}% (not download progress)
+下载完成，已停止做种|Download complete; seeding stopped
+下载完成，正在做种|Download complete; seeding
+正在接收数据；当前 BT 连接 {live_peers} 个，已观察到持续收数节点 {stable_peers} 个，已有校验通过传输记录的 HTTP WebSeed {verified_webseeds} 个（历史记录不代表当前可用）|Receiving data; BT peers: {live_peers}; sustained peers: {stable_peers}; HTTP WebSeeds with verified history: {verified_webseeds} (history is not current availability)
+HTTP WebSeed 正在请求并校验分片，尚未收到可交给引擎的完整数据；当前没有在线 BT 节点|HTTP WebSeed is requesting and verifying a piece; no complete data ready for the engine. No online BT peers.
+HTTP WebSeed 请求失败，正在退避等待重试；当前没有在线 BT 节点，历史校验传输不代表当前可用|HTTP WebSeed request failed; waiting to retry. No online BT peers. Historical transfers do not imply availability.
+已找到候选节点，累计尝试连接 {attempts} 次，节点错误 {connection_errors} 次，目前无连接；引擎继续重试。Tracker 报告数不代表可连接节点|Candidates found; attempts: {attempts}; errors: {connection_errors}. No active peers; retrying. Tracker counts do not imply reachable peers.
+元数据已就绪，尚未观察到节点连接尝试；DHT {}，缓存节点 {}|Metadata ready; no connection attempts observed. DHT: {}; cached peers: {}
+节点已连接，尚未取得分片声明，无法判断所缺分片覆盖率|Peers connected; waiting for declarations. Missing-piece coverage unknown.
+已读取 {} 个在线节点的分片声明，未发现当前所缺分片；另有 {} 个节点尚未提供声明。这不是整个网络无来源的证明|Read {} online declarations; no needed pieces found. {} peers have unknown declarations. This does not prove that the whole swarm has no sources.
+{} 个节点声明持有所缺分片，但当前全部处于 choke（未允许传输）状态；等待对端调度，不据此判定恶意|{} peers claim needed pieces but all are choked (not permitting transfer). Waiting for peer scheduling; this does not imply malicious behavior.
+已请求 {} 个数据块，暂未收到数据；声明持有所缺分片的节点 {} 个，其中 {} 个当前未允许传输|Requested {} blocks; no data received. {} peers claim needed pieces; {} do not permit transfer.
+节点声明有需要的分片且允许传输，尚未观察到数据块传来；等待请求调度|Peers claim needed pieces and permit transfer; no blocks received yet. Waiting for scheduling.
+{} · {} 个文件 · 已等待 {} 秒；下载进度将在续传状态就绪后显示|{} · {} files · Waiting {} seconds; progress appears when resume state is ready
+正在打开本地文件|Opening local files
+排队恢复（小任务优先）|Queued for restore (smaller tasks first)
+正在解析磁力链接元数据|Resolving magnet metadata
+未知数量|Unknown count
+已启用|Enabled
+获取元数据，第 {attempt}/2 轮；DHT {}，候选 Tracker {}，缓存节点 {}|Metadata attempt {attempt}/2; DHT: {}; candidate Trackers: {}; cached peers: {}
+90 秒内未收到完整元数据|Complete metadata not received within 90 seconds
+元数据获取失败：两轮找源仍未收到完整元数据。请查看诊断日志，重试或导入 .torrent；Tracker 有做种统计不代表节点可连接。|Metadata failed after two discovery attempts. Check diagnostics, retry or import a .torrent file. Tracker counts do not imply reachable peers.
+查询完成：{success}/{} 个 Tracker 返回本资源统计。应用候选会重新校验已有文件。{}|Query complete: {success}/{} Trackers returned statistics. Applying candidates rechecks existing files. {}
+{}：已更新（{}）|{}: updated ({})
+{}：刷新失败，{}；稍后重试。{}|{}: refresh failed, {}; retrying later. {}
+暂无缓存|No cached list
+沿用上次成功缓存|Using last successful cached list
+下载目录必须是绝对路径|Download directory must be an absolute path
+连接数应为 10–2000|Peer limit must be 10–2000
+限速超出支持范围|Speed limit exceeds supported range
+至少选择一个文件；需要停止下载请暂停任务|Select at least one file; pause the task to stop downloading
+文件编号无效|Invalid file index
+文件校验中，请等待结束后删除数据|Files are being checked; wait before deleting data
+文件被另一任务 {other} 使用，拒绝删除|Files are used by task {other}; deletion refused
+用户根据传输记录手动加入黑名单|Manually blocked based on transfer records
+用户手动解除黑名单|Manually unblocked
+文件正在校验，请校验完成后播放|Files are being checked; wait before playback
+语言设置保存失败：{}|Cannot save language preference: {}
+语言已切换，下载不受影响。|Language changed; downloads continue unaffected.
