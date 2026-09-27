@@ -301,7 +301,7 @@ impl Player {
         }
         ctx.request_repaint_after(Duration::from_millis(250));
         let mut open = self.open;
-        egui::Window::new(crate::i18n::t("Flow 播放器")).open(&mut open).default_width(640.0).show(ctx,|ui| {
+        egui::Window::new(crate::i18n::t("Flow 播放器")).collapsible(false).open(&mut open).default_width(640.0).show(ctx,|ui| {
             ui.horizontal(|ui| {
                 ui.heading(egui::RichText::new(crate::i18n::t("FLOW / PLAY")).color(egui::Color32::from_rgb(28,180,164)));
                 if ui.button(crate::i18n::t("打开文件…")).clicked() {

@@ -233,3 +233,5 @@ Flow 处于早期开发阶段，尚未实现主题跨启动保存。HTTP 下载�
 基于 [egui](https://github.com/emilk/egui) 和 [librqbit](https://github.com/ikatson/rqbit) 构建。
 
 托盘操作：右键单击打开“显示主界面 / 停止下载并退出”菜单；左键单击不动作，左键双击显示主界面。
+
+顶部操作使用矢量图标，悬停显示中英文说明。Tracker 订阅设置可从工具栏或设置打开，无需选中任务。设置及工具子窗口不再提供收起按钮。

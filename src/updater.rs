@@ -319,7 +319,7 @@ impl Updater {
         }
         let mut open = true;
         let mut exit = false;
-        egui::Window::new(crate::i18n::t("软件更新")).open(&mut open).default_width(560.0).show(ctx,|ui|{
+        egui::Window::new(crate::i18n::t("软件更新")).collapsible(false).open(&mut open).default_width(560.0).show(ctx,|ui|{
             ui.heading(crate::i18n::t(format!("Flow {}",env!("CARGO_PKG_VERSION"))));
             ui.checkbox(&mut self.config.auto_check,crate::i18n::t("启动时自动检查更新（安装前需确认）"));
             ui.label(crate::i18n::t("GitHub 镜像代理前缀（留空直连官方）"));

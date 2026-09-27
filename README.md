@@ -231,3 +231,5 @@ Flow is an early desktop implementation. Persistent theme selection is not imple
 Built with [egui](https://github.com/emilk/egui) and [librqbit](https://github.com/ikatson/rqbit).
 
 Tray controls: right-click opens Show main window / Stop downloads and exit; a single left-click does nothing, and a left double-click restores the main window.
+
+Toolbar actions use vector icons with localized hover hints. Tracker subscriptions can be opened directly from the toolbar or Settings, even without a selected task. Settings and utility windows cannot be collapsed.

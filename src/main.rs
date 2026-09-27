@@ -13,6 +13,7 @@ mod player;
 mod player_setup;
 mod settings;
 mod subscriptions;
+mod toolbar;
 mod torrent_preview;
 mod trackers;
 mod tray;
@@ -684,6 +685,22 @@ impl DownloadApp {
             }
         });
         ui.separator();
+        if self.tab == 2 {
+            ui.horizontal(|ui| {
+                if toolbar::button(
+                    ui,
+                    self.connected,
+                    toolbar::Icon::Subscriptions,
+                    "Tracker 订阅设置",
+                )
+                .clicked()
+                {
+                    self.subscription_edit =
+                        serde_json::from_value(self.state["subscriptions"]["config"].clone()).ok();
+                }
+                ui.weak(crate::i18n::t("Tracker 订阅设置"));
+            });
+        }
         egui::ScrollArea::both().auto_shrink([false,false]).id_salt("details_scroll").show(ui, |ui| {
             let task = list(&self.state["tasks"]).into_iter().find(|t| text(t, "id") == self.selected);
             if self.tab == 5 { self.chart(ui); }
@@ -785,9 +802,6 @@ impl DownloadApp {
                             let running = self.state["detail"]["discovery"]["running"].as_bool().unwrap_or(false);
                             if ui.add_enabled(!running, egui::Button::new(crate::i18n::t(if running {"正在发现…"} else {"发现与查询统计"}))).clicked() {self.action("discover");}
                             if ui.button(crate::i18n::t("添加 Tracker…")).clicked() {self.tracker_open = true;}
-                            if ui.button(crate::i18n::t("订阅设置…")).clicked() {
-                                self.subscription_edit = serde_json::from_value(self.state["subscriptions"]["config"].clone()).ok();
-                            }
                             if ui.button(crate::i18n::t("重新查询")).clicked() {self.action("announce");}
                             if ui.button(crate::i18n::t("应用候选（重新校验）")).clicked() {self.action("apply_trackers");}
                         });
@@ -1032,68 +1046,71 @@ impl eframe::App for DownloadApp {
                 );
                 ui.weak(crate::i18n::t("下载工作台"));
                 ui.separator();
-                if ui
-                    .add_enabled(
-                        self.connected,
-                        egui::Button::new(crate::i18n::t("＋ 新建任务")),
-                    )
-                    .clicked()
+                if toolbar::button(ui, self.connected, toolbar::Icon::Add, "＋ 新建任务").clicked()
                 {
                     self.new_task();
                 }
-                if ui.button(crate::i18n::t("播放器…")).clicked() {
+                if toolbar::button(ui, true, toolbar::Icon::Player, "播放器…").clicked() {
                     self.player.open = true;
                 }
-                if ui
-                    .button(crate::i18n::t("退出程序"))
-                    .on_hover_text(crate::i18n::t("停止下载并完全退出，包括后台引擎"))
-                    .clicked()
+                if toolbar::button(
+                    ui,
+                    true,
+                    toolbar::Icon::Exit,
+                    "停止下载并完全退出，包括后台引擎",
+                )
+                .clicked()
                 {
                     self.exit_requested = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 ui.add_enabled_ui(self.connected && has_selection, |ui| {
-                    if ui
-                        .add_enabled(can_resume, egui::Button::new(crate::i18n::t("▶ 继续")))
-                        .clicked()
+                    if toolbar::button(ui, can_resume, toolbar::Icon::Resume, "▶ 继续").clicked()
                     {
                         self.action("resume");
                     }
-                    if ui
-                        .add_enabled(can_pause, egui::Button::new(crate::i18n::t("Ⅱ 暂停")))
-                        .clicked()
+                    if toolbar::button(ui, can_pause, toolbar::Icon::Pause, "Ⅱ 暂停").clicked()
                     {
                         self.action("pause");
                     }
-                    if ui
-                        .add_enabled(
-                            selected_task.is_some_and(|t| text(t, "kind") != "http"),
-                            egui::Button::new(crate::i18n::t("校验文件")),
-                        )
-                        .clicked()
+                    if toolbar::button(
+                        ui,
+                        selected_task.is_some_and(|t| text(t, "kind") != "http"),
+                        toolbar::Icon::Check,
+                        "校验文件",
+                    )
+                    .clicked()
                     {
                         self.action("recheck");
                     }
-                    if ui.button(crate::i18n::t("移除任务")).clicked() {
+                    if toolbar::button(ui, true, toolbar::Icon::Remove, "移除任务").clicked() {
                         self.open_remove();
                     }
                 });
-                if ui
-                    .add_enabled(self.connected, egui::Button::new(crate::i18n::t("设置…")))
-                    .clicked()
+                ui.separator();
+                if toolbar::button(
+                    ui,
+                    self.connected,
+                    toolbar::Icon::Subscriptions,
+                    "Tracker 订阅设置",
+                )
+                .clicked()
+                {
+                    self.subscription_edit =
+                        serde_json::from_value(self.state["subscriptions"]["config"].clone()).ok();
+                }
+                if toolbar::button(ui, self.connected, toolbar::Icon::Settings, "设置…").clicked()
                 {
                     self.settings_edit =
                         serde_json::from_value(self.state["settings"].clone()).ok();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(crate::i18n::t("更新…")).clicked() {
+                    if toolbar::button(ui, true, toolbar::Icon::Update, "更新…").clicked() {
                         self.updater.open = true;
                     }
                     crate::i18n::selector(ui, "main-language");
-                    if ui
-                        .checkbox(&mut self.dark, crate::i18n::t("深色"))
-                        .changed()
-                    {
+                    if toolbar::button(ui, true, toolbar::Icon::Theme, "深色").clicked() {
+                        self.dark = !self.dark;
                         ctx.set_visuals(if self.dark {
                             egui::Visuals::dark()
                         } else {
@@ -1433,6 +1450,7 @@ impl eframe::App for DownloadApp {
             let mut open = true;
             let mut selected = None;
             egui::Window::new(crate::i18n::t("选择要播放的文件"))
+                .collapsible(false)
                 .open(&mut open)
                 .default_width(580.0)
                 .show(ctx, |ui| {
@@ -1568,7 +1586,7 @@ impl eframe::App for DownloadApp {
         }
         if self.peer_manager {
             let mut open = true;
-            egui::Window::new(crate::i18n::t("节点记录与黑名单")).open(&mut open).default_width(850.0).max_height((ctx.content_rect().height()-80.0).max(180.0)).vscroll(true).show(ctx, |ui| {
+            egui::Window::new(crate::i18n::t("节点记录与黑名单")).collapsible(false).open(&mut open).default_width(850.0).max_height((ctx.content_rect().height()-80.0).max(180.0)).vscroll(true).show(ctx, |ui| {
                 ui.label(crate::i18n::t("传输参考分：持续收数 90，间歇收数 60，观察满一分钟暂无传输 10；新节点不打分。分数只反映本机近期观察，不证明恶意。"));
                 ui.weak(crate::i18n::t("记录最后一次观察的任务和会话累计收发；历史分数不代表当前状态。黑名单按 IP 作用于所有 BT 任务，重启后阻止进出连接；解除同样需重启。"));
                 ui.checkbox(&mut self.only_blocked_peers, crate::i18n::t("只显示黑名单"));
@@ -1613,7 +1631,7 @@ impl eframe::App for DownloadApp {
         }
         if self.tracker_open {
             let mut open = true;
-            egui::Window::new(crate::i18n::t("添加 Tracker")).open(&mut open).default_width(550.0).show(ctx, |ui| {
+            egui::Window::new(crate::i18n::t("添加 Tracker")).collapsible(false).open(&mut open).default_width(550.0).show(ctx, |ui| {
                 ui.label(crate::i18n::t("每行一个 http / https / udp 地址，最多 200 个"));
                 ui.add(egui::TextEdit::multiline(&mut self.trackers).desired_rows(10).desired_width(f32::INFINITY));
                 if ui.button(crate::i18n::t("保存候选")).clicked() {
@@ -1690,11 +1708,12 @@ impl eframe::App for DownloadApp {
         if let Some(mut config) = self.settings_edit.take() {
             let mut open = true;
             let mut saved = false;
-            egui::Window::new(crate::i18n::t("下载设置"))
+            egui::Window::new(crate::i18n::t("下载设置")).collapsible(false)
                 .open(&mut open)
                 .default_width(570.0)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {ui.label(crate::i18n::t("语言 / Language"));crate::i18n::selector(ui,"settings-language");});
+                    if ui.button(crate::i18n::t("Tracker 订阅设置")).clicked() { self.subscription_edit = serde_json::from_value(self.state["subscriptions"]["config"].clone()).ok(); }
                     ui.label(crate::i18n::t("默认下载目录（仅影响新任务）"));
                     ui.horizontal(|ui| {
                         ui.add(
@@ -1765,7 +1784,7 @@ impl eframe::App for DownloadApp {
         if let Some(mut config) = self.subscription_edit.take() {
             let mut open = true;
             let mut saved = false;
-            egui::Window::new(crate::i18n::t("Tracker 订阅设置")).open(&mut open).default_width(660.0).show(ctx, |ui| {
+            egui::Window::new(crate::i18n::t("Tracker 订阅设置")).collapsible(false).open(&mut open).default_width(660.0).show(ctx, |ui| {
                 ui.label(crate::i18n::t("同一来源的镜像按顺序尝试；全部失败时沿用缓存。"));
                 ui.horizontal(|ui| {
                     ui.label(crate::i18n::t("列表更新（小时）")); ui.add(egui::DragValue::new(&mut config.refresh_hours).range(1..=168));
