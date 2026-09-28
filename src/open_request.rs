@@ -122,8 +122,37 @@ pub fn copied_magnet(text: &str) -> Option<String> {
     Some(format!("magnet:?{}", url.query()?))
 }
 
+/// Only prompt for a plain URL that looks like a downloadable file. A copied
+/// webpage URL must not interrupt the user or start a network probe.
+pub fn copied_download_link(text: &str) -> Option<String> {
+    let source = text.trim();
+    if source.len() > 32768 || source.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let url = crate::http_download::validate_url(source).ok()?;
+    let filename = url.path_segments()?.next_back()?;
+    let extension = Path::new(filename).extension()?.to_str()?;
+    const FILE_EXTENSIONS: &[&str] = &[
+        "7z", "apk", "avi", "bin", "bz2", "deb", "dmg", "doc", "docx", "epub", "exe", "flac", "gz",
+        "img", "iso", "m4a", "mkv", "mov", "mp3", "mp4", "msi", "pdf", "pkg", "rar", "rpm", "tar",
+        "torrent", "wav", "webm", "wim", "xz", "zip",
+    ];
+    FILE_EXTENSIONS
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        .then(|| source.to_owned())
+}
+
+pub fn copied_source(text: &str) -> Option<String> {
+    copied_magnet(text).or_else(|| copied_download_link(text))
+}
+
 pub fn validate(source: &str) -> Result<String> {
     ensure!(source.len() <= 32768, "链接过长");
+    if crate::http_download::is_http(source) {
+        crate::http_download::validate_url(source)?;
+        return Ok(source.to_owned());
+    }
     if source
         .get(..8)
         .is_some_and(|s| s.eq_ignore_ascii_case("magnet:?"))
@@ -195,6 +224,28 @@ mod tests {
         assert!(copied_magnet("magnet:?xt=urn:btih:broken").is_none());
     }
     #[test]
+    fn copied_http_prompts_only_for_obvious_file_links() {
+        let file = "https://example.invalid/releases/download/app/Flow.zip?token=abc";
+        assert_eq!(copied_source(file).as_deref(), Some(file));
+        assert_eq!(
+            copied_source("  https://example.invalid/film.MP4  ").as_deref(),
+            Some("https://example.invalid/film.MP4")
+        );
+        for page in [
+            "https://example.invalid/",
+            "https://example.invalid/download",
+            "https://example.invalid/watch?id=1",
+            "https://example.invalid/index.html",
+            "https://user:pass@example.invalid/file.zip",
+            "https://example.invalid/share/magnet:?xt=invalid",
+            "https://example.invalid/file.zip another line",
+        ] {
+            assert_eq!(copied_source(page), None, "unexpected prompt for {page}");
+        }
+        let wrapped = "https://example.invalid/share/magnet:?xt=urn:btih:F553895F3FFB43482406D77B0664C39A8681EA37";
+        assert!(copied_source(wrapped).unwrap().starts_with("magnet:?"));
+    }
+    #[test]
     fn shell_requests_preserve_links_and_spaces_without_execution() {
         let temp = tempfile::tempdir().unwrap();
         let link =
@@ -214,7 +265,10 @@ mod tests {
                     .to_string()
             )
         );
-        assert!(validate("https://example.invalid").is_err());
+        let direct = "https://example.invalid/releases/Flow.zip?token=abc";
+        enqueue(temp.path(), direct).unwrap();
+        assert_eq!(take(temp.path()).unwrap(), Some(direct.into()));
+        assert!(validate("https://user:pass@example.invalid/file.zip").is_err());
         assert!(validate("--check-backend").is_err());
         assert!(validate("magnet:?dn=nohash").is_err());
     }

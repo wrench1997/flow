@@ -210,12 +210,12 @@ Tracker 地址|Tracker URL
 关闭后自动停止已完成任务的上传；下载过程中仍可能上传已有分片。|When off, completed tasks stop uploading. Existing pieces may still upload during download.
 关闭窗口后在系统托盘继续下载|Continue in the tray when the window closes
 托盘双击显示窗口；托盘菜单“退出并停止下载”会保存状态并退出。|Double-click the tray icon to show Flow. Exit and stop downloads saves state and exits.
-复制磁力链接时弹出新建任务（包括网页中嵌入的磁力地址）|Prompt for copied magnets, including magnets embedded in web URLs
+复制磁力或明确的 HTTP(S) 文件直链时弹出新建任务|Prompt for copied magnets or clear HTTP(S) file links
 软件更新 / 镜像代理…|Updates / mirror proxy…
 关联 .torrent 文件（双击用 Flow 打开）|Associate .torrent files (double-click to open in Flow)
 已注册种子关联。如系统已有默认应用，请右键种子 → 打开方式 → Flow → 始终使用。|Association registered. If another default exists: right-click a torrent → Open with → Flow → Always use.
 关联失败：{error}|Association failed: {error}
-仅在本机识别，不访问分享网页；确认后才开始下载。Flow 需保持运行或驻留托盘。|Detected locally without visiting sharing pages. Starts after confirmation. Flow must be running or in the tray.
+仅在本机识别，不访问分享网页；确认后才开始下载。普通网页地址不会提示。Flow 需保持运行或驻留托盘。|Detected locally without visiting sharing pages. Starts after confirmation. Ordinary webpage URLs do not prompt. Flow must be running or in the tray.
 下载 KiB/s|Download KiB/s
 上传 KiB/s|Upload KiB/s
 连接上限（重启后生效）|Peer limit (requires restart)

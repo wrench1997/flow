@@ -259,7 +259,7 @@ impl DownloadApp {
                                 .and_then(|c: &mut arboard::Clipboard| c.get_text().ok())
                             {
                                 sequence = current;
-                                if let Some(source) = open_request::copied_magnet(&value) {
+                                if let Some(source) = open_request::copied_source(&value) {
                                     if events.send(Event::Open(source)).is_err() {
                                         break;
                                     }
@@ -1792,7 +1792,7 @@ impl eframe::App for DownloadApp {
                         crate::i18n::t("关闭窗口后在系统托盘继续下载"),
                     );
                     ui.weak(crate::i18n::t("托盘双击显示窗口；托盘菜单“退出并停止下载”会保存状态并退出。"));
-                    ui.checkbox(&mut config.clipboard_watch, crate::i18n::t("复制磁力链接时弹出新建任务（包括网页中嵌入的磁力地址）"));
+                    ui.checkbox(&mut config.clipboard_watch, crate::i18n::t("复制磁力或明确的 HTTP(S) 文件直链时弹出新建任务"));
                     if ui.button(crate::i18n::t("软件更新 / 镜像代理…")).clicked() { self.updater.open = true; }
                     if ui.button(crate::i18n::t("节点记录 / 黑名单管理…")).clicked() { self.peer_manager = true; }
                     if ui.button(crate::i18n::t("关联 .torrent 文件（双击用 Flow 打开）")).clicked() {
@@ -1801,7 +1801,7 @@ impl eframe::App for DownloadApp {
                             Err(error) => format!("关联失败：{error}"),
                         };
                     }
-                    ui.weak(crate::i18n::t("仅在本机识别，不访问分享网页；确认后才开始下载。Flow 需保持运行或驻留托盘。"));
+                    ui.weak(crate::i18n::t("仅在本机识别，不访问分享网页；确认后才开始下载。普通网页地址不会提示。Flow 需保持运行或驻留托盘。"));
                     ui.horizontal(|ui| {
                         ui.label(crate::i18n::t("下载 KiB/s"));
                         ui.add(egui::DragValue::new(&mut config.download_kib).range(0..=4_000_000));
@@ -1997,7 +1997,7 @@ fn main() -> eframe::Result {
     }
     if args.iter().any(|arg| arg == "--check-clipboard") {
         let result = arboard::Clipboard::new().and_then(|mut c| c.get_text());
-        let report = json!({"sequence":open_request::clipboard_sequence(),"readable":result.is_ok(),"magnet_detected":result.as_ref().ok().and_then(|s|open_request::copied_magnet(s)).is_some()});
+        let report = json!({"sequence":open_request::clipboard_sequence(),"readable":result.is_ok(),"magnet_detected":result.as_ref().ok().and_then(|s|open_request::copied_magnet(s)).is_some(),"download_link_detected":result.as_ref().ok().and_then(|s|open_request::copied_download_link(s)).is_some()});
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
                 let _ = std::fs::write(
