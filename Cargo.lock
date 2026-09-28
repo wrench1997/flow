@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "flow-download"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1309,6 +1309,7 @@ dependencies = [
  "serde",
  "serde_bencode",
  "serde_json",
+ "sevenz-rust2",
  "sha2",
  "tempfile",
  "tokio",
@@ -2583,6 +2584,12 @@ name = "lru-slab"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
+
+[[package]]
+name = "lzma-rust2"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fde178a3caf126c440fa15628147772d8ee590a39477d711353fbe2e58a73a5b"
 
 [[package]]
 name = "matchers"
@@ -4139,6 +4146,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "sevenz-rust2"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a4f883677093690e91fef8ae81fad8bce9e2c3a079b61054f05ce0d3ecf681e"
+dependencies = [
+ "crc32fast",
+ "js-sys",
+ "lzma-rust2",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -4,7 +4,6 @@ use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     path::Path,
-    process::{Command, Stdio},
     sync::mpsc,
     time::Duration,
 };
@@ -69,7 +68,7 @@ fn download(
     Ok(())
 }
 
-fn install(root: &Path, progress: impl Fn(String)) -> Result<()> {
+pub fn install(root: &Path, progress: impl Fn(String)) -> Result<()> {
     let runtime = root.join("runtime");
     std::fs::create_dir_all(&runtime).context("无法创建播放器目录，请检查目录权限")?;
     // Serialize setup across processes; never replace a runtime used by another installer.
@@ -98,41 +97,7 @@ fn install(root: &Path, progress: impl Fn(String)) -> Result<()> {
         progress("校验通过，正在配置播放器…".into());
         let unpacked = staging.join("unpacked");
         std::fs::create_dir(&unpacked)?;
-        // Use the Windows-supplied archive utility, not a PowerShell script.
-        let tar = std::env::var_os("SystemRoot")
-            .map(std::path::PathBuf::from)
-            .context("找不到 Windows 系统目录")?
-            .join("System32/tar.exe");
-        let mut command = Command::new(tar);
-        command
-            .arg("-xf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(&unpacked)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000);
-        }
-        let mut child = command
-            .spawn()
-            .context("无法启动系统解压工具（需要 Windows 10/11）")?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(120);
-        loop {
-            if let Some(status) = child.try_wait()? {
-                ensure!(status.success(), "播放器解压失败，请重试");
-                break;
-            }
-            if std::time::Instant::now() > deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                anyhow::bail!("播放器解压超时，请重试");
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        extract_archive(&archive, &unpacked)?;
         ensure!(unpacked.join("mpv.exe").is_file(), "安装包中未找到播放内核");
         let backup = runtime.join(format!("mpv-backup-{}", uuid::Uuid::new_v4()));
         let had_existing = destination.exists();
@@ -152,9 +117,41 @@ fn install(root: &Path, progress: impl Fn(String)) -> Result<()> {
     result
 }
 
+/// Extract the verified 7z payload in-process. Windows 10's tar.exe cannot
+/// consistently read 7z archives, and its previous stderr was discarded.
+fn extract_archive(archive: &Path, destination: &Path) -> Result<()> {
+    let mut extracted_bytes = 0u64;
+    sevenz_rust2::decompress_file_with_extract_fn(archive, destination, |entry, reader, path| {
+        extracted_bytes = extracted_bytes.saturating_add(entry.size());
+        if extracted_bytes > 1024 * 1024 * 1024 {
+            return Err(sevenz_rust2::Error::Other("播放器解压内容超过 1 GiB 限制".into()));
+        }
+        sevenz_rust2::default_entry_extract_fn(entry, reader, path)
+    })
+    .with_context(|| format!("播放器 7z 解压失败：{}", archive.display()))?;
+    ensure!(destination.join("mpv.exe").is_file(), "播放器压缩包缺少 mpv.exe");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn in_process_extractor_rejects_invalid_archive_with_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("bad.7z");
+        std::fs::write(&archive, b"not a seven zip archive").unwrap();
+        let error = extract_archive(&archive, &dir.path().join("out")).unwrap_err();
+        assert!(format!("{error:#}").contains("7z 解压失败"));
+    }
+    #[test]
+    #[ignore = "requires FLOW_TEST_MPV_ARCHIVE pointing at the pinned 7z file"]
+    fn real_archive_extracts_without_windows_tar() {
+        let archive = std::env::var_os("FLOW_TEST_MPV_ARCHIVE").expect("set FLOW_TEST_MPV_ARCHIVE");
+        let dir = tempfile::tempdir().unwrap();
+        extract_archive(Path::new(&archive), dir.path()).unwrap();
+        assert!(dir.path().join("mpv.exe").metadata().unwrap().len()>100_000_000);
+    }
     #[test]
     fn rejects_corrupt_download_before_installation() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

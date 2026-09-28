@@ -1,17 +1,9 @@
 $ErrorActionPreference = 'Stop'
-# Windows build linked from https://mpv.io/installation/. Pin archive and checksum.
-$archiveUrl = 'https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260925/mpv-x86_64-20260925-git-2a4eb8067c.7z'
-$expectedHash = 'aef0320478257259c7365087b6d3c87c91c8731b1f3a4e52f1d86d36bac9c998'
-$runtimeDirectory = Join-Path $PSScriptRoot 'runtime/mpv'
-$archiveDirectory = Join-Path $PSScriptRoot 'build/player-download'
-New-Item -ItemType Directory -Force $runtimeDirectory, $archiveDirectory | Out-Null
-$archivePath = Join-Path $archiveDirectory 'mpv.7z'
-if (!(Test-Path -LiteralPath $archivePath) -or (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedHash) {
-    Invoke-WebRequest -Uri $archiveUrl -OutFile $archivePath
-}
-if ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedHash) {
-    throw 'mpv archive checksum mismatch; extraction cancelled.'
-}
-& tar -xf $archivePath -C $runtimeDirectory
-if ($LASTEXITCODE -ne 0) { throw 'Could not extract mpv archive using Windows tar.' }
-Write-Output 'Player ready. Keep runtime/mpv beside Flow.exe. No system installation was performed.'
+$flow = Join-Path $PSScriptRoot 'Flow.exe'
+if (-not (Test-Path -LiteralPath $flow)) { throw 'Flow.exe is missing from this directory.' }
+$process = Start-Process -FilePath $flow -ArgumentList '--install-player' -WindowStyle Hidden -PassThru -Wait
+$reportPath = Join-Path $PSScriptRoot 'player-install-result.json'
+if (-not (Test-Path -LiteralPath $reportPath)) { throw 'Flow did not return an installation result.' }
+$report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+if ($process.ExitCode -ne 0 -or -not $report.ok) { throw "Player installation failed: $($report.error)" }
+Write-Output "Player ready: $($report.player)"

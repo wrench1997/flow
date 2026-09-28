@@ -1949,6 +1949,22 @@ fn main() -> eframe::Result {
         i18n::initialize(&root);
     }
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|s| s == "--install-player") {
+        let result = std::env::current_exe()
+            .map_err(anyhow::Error::from)
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf).ok_or_else(||anyhow::anyhow!("无法定位 Flow 目录")))
+            .and_then(|root| {
+                let install = player_setup::install(&root, |_| {});
+                let report = match &install {
+                    Ok(()) => json!({"ok":true,"player":root.join("runtime/mpv/mpv.exe")}),
+                    Err(error) => json!({"ok":false,"error":format!("{error:#}")}),
+                };
+                let _ = std::fs::write(root.join("player-install-result.json"), serde_json::to_vec_pretty(&report).unwrap());
+                install
+            });
+        if result.is_err() { std::process::exit(1); }
+        return Ok(());
+    }
     if args.first().is_some_and(|s| s == "--diagnose-magnets") {
         let result=(||->anyhow::Result<()> {
             anyhow::ensure!(args.len()==3,"Usage: --diagnose-magnets input.json output.json");
