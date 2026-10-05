@@ -131,7 +131,7 @@
 
 ## 构建与运行
 
-**直接使用成品：** 前往 [GitHub Releases 发布页面](https://github.com/wrench1997/flow/releases/latest) 下载 `Flow.exe`。发布附件同时提供 SHA-256 校验文件。
+**直接使用成品：** 前往 [Flow 0.4.17 发布页面](https://github.com/wrench1997/flow/releases/tag/v0.4.17) 下载安装包、绿色 ZIP 或 `Flow.exe`。本版需手动升级，发布附件同时提供 SHA-256 校验文件。
 
 当前支持的桌面目标为 **Windows x64（MSVC）**。源码构建需要 Rust/Cargo，以及包含 Windows SDK 的 Visual Studio C++ 构建工具。
 

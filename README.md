@@ -126,7 +126,7 @@ Copies without the built-in updater need a manual upgrade first. Installation do
 
 ## Build and run
 
-**Ready-to-run Windows build:** download `Flow.exe` from [GitHub Releases](https://github.com/wrench1997/flow/releases/latest). SHA-256 checksums are included with each release.
+**Ready-to-run Windows build:** download the installer, portable ZIP or `Flow.exe` from the [Flow 0.4.17 release](https://github.com/wrench1997/flow/releases/tag/v0.4.17). This release requires a manual upgrade. SHA-256 checksums are included.
 
 Supported desktop target: **Windows x64 (MSVC)**. Building requires Rust/Cargo and Visual Studio C++ build tools with the Windows SDK.
 
