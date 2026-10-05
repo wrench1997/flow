@@ -48,6 +48,77 @@ enum Event {
     Open(String),
 }
 
+// Polling continues while the window is hidden or its UI thread is busy. Keep
+// only the newest refresh instead of queuing every full download snapshot.
+struct RefreshSlot {
+    event: Option<Event>,
+    connected: bool,
+}
+
+#[derive(Clone)]
+struct EventSender {
+    tx: mpsc::Sender<Event>,
+    refresh: std::sync::Arc<std::sync::Mutex<RefreshSlot>>,
+}
+
+struct EventReceiver {
+    rx: mpsc::Receiver<Event>,
+    refresh: std::sync::Arc<std::sync::Mutex<RefreshSlot>>,
+}
+
+fn event_channel() -> (EventSender, EventReceiver) {
+    let (tx, rx) = mpsc::channel();
+    let refresh = std::sync::Arc::new(std::sync::Mutex::new(RefreshSlot {
+        event: None,
+        connected: true,
+    }));
+    (
+        EventSender {
+            tx,
+            refresh: refresh.clone(),
+        },
+        EventReceiver { rx, refresh },
+    )
+}
+
+impl EventSender {
+    fn send(&self, event: Event) -> Result<(), mpsc::SendError<Event>> {
+        if matches!(&event, Event::State(_) | Event::RefreshFailed(..)) {
+            let mut refresh = self.refresh.lock().unwrap();
+            if !refresh.connected {
+                return Err(mpsc::SendError(event));
+            }
+            refresh.event = Some(event);
+            return Ok(());
+        }
+        if matches!(
+            &event,
+            Event::Starting(_) | Event::StartupFailed(_) | Event::Duplicate
+        ) {
+            // A refresh from the previous engine must not override a retry's
+            // startup status when the UI resumes processing events.
+            self.refresh.lock().unwrap().event = None;
+        }
+        self.tx.send(event)
+    }
+}
+
+impl EventReceiver {
+    fn try_recv(&self) -> Result<Event, mpsc::TryRecvError> {
+        self.rx
+            .try_recv()
+            .or_else(|error| self.refresh.lock().unwrap().event.take().ok_or(error))
+    }
+}
+
+impl Drop for EventReceiver {
+    fn drop(&mut self) {
+        let mut refresh = self.refresh.lock().unwrap();
+        refresh.connected = false;
+        refresh.event = None;
+    }
+}
+
 struct DownloadApp {
     shutdown: backend::Shutdown,
     clipboard_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -82,7 +153,7 @@ struct DownloadApp {
     settings_edit: Option<settings::Settings>,
     subscription_edit: Option<subscriptions::Config>,
     tx: mpsc::Sender<Command>,
-    rx: mpsc::Receiver<Event>,
+    rx: EventReceiver,
     state: Value,
     selected: String,
     filter: usize,
@@ -216,7 +287,7 @@ impl DownloadApp {
         style.spacing.item_spacing = egui::vec2(8.0, 7.0);
         cc.egui_ctx.set_style(style);
         let (tx, commands) = mpsc::channel();
-        let (events, rx) = mpsc::channel();
+        let (events, rx) = event_channel();
         let ctx = cc.egui_ctx.clone();
         let request_root = root.clone();
         use raw_window_handle::HasWindowHandle;
@@ -1920,6 +1991,115 @@ fn matches_filter(t: &Value, filter: usize) -> bool {
         3 => num(t, "progress") >= 1.0 && text(t, "error").is_empty(),
         4 => !text(t, "error").is_empty(),
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod event_channel_tests {
+    use super::*;
+
+    #[test]
+    fn memory_stalled_ui_keeps_only_the_newest_download_snapshot() {
+        let (tx, rx) = event_channel();
+        let producer = thread::spawn(move || {
+            for sample in 0..20_000 {
+                let state = json!({
+                    "sample": sample,
+                    "tasks": [{"paused": sample % 2 == 0, "name": "x".repeat(8192)}],
+                });
+                assert!(tx.send(Event::State(state)).is_ok());
+            }
+            // Keep the sender alive until the consumer checks the queue.
+            tx
+        });
+        let _tx = producer.join().unwrap();
+
+        // No full snapshot may enter the unbounded discrete-event queue.
+        assert!(matches!(rx.rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        {
+            let refresh = rx.refresh.lock().unwrap();
+            let Some(Event::State(state)) = &refresh.event else {
+                panic!("latest snapshot missing");
+            };
+            assert_eq!(state["sample"], 19_999);
+            assert_eq!(state["tasks"][0]["name"].as_str().unwrap().len(), 8192);
+            // Retained JSON stays one snapshot even after hours of polls.
+            assert!(serde_json::to_vec(state).unwrap().len() < 9000);
+        }
+        assert!(matches!(rx.try_recv(), Ok(Event::State(state)) if state["sample"] == 19_999));
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn memory_refresh_errors_and_recovered_states_replace_each_other() {
+        let (tx, rx) = event_channel();
+        assert!(tx.send(Event::State(json!({"sample": 0}))).is_ok());
+        for sample in 0..20_000 {
+            assert!(
+                tx.send(Event::RefreshFailed(true, format!("failure {sample}")))
+                    .is_ok()
+            );
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::RefreshFailed(true, message)) if message == "failure 19999"
+        ));
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+
+        assert!(
+            tx.send(Event::RefreshFailed(false, "offline".into()))
+                .is_ok()
+        );
+        assert!(tx.send(Event::State(json!({"sample": 1}))).is_ok());
+        assert!(matches!(rx.try_recv(), Ok(Event::State(state)) if state["sample"] == 1));
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn memory_stalled_ui_preserves_action_responses_and_discrete_events() {
+        let (tx, rx) = event_channel();
+        assert!(tx.send(Event::State(json!({"sample": 0}))).is_ok());
+        assert!(tx.send(Event::Done("paused".into())).is_ok());
+        assert!(tx.send(Event::Open("new-download".into())).is_ok());
+        for sample in 1..20_000 {
+            assert!(tx.send(Event::State(json!({"sample": sample}))).is_ok());
+        }
+        assert!(tx.send(Event::Error("action failed".into())).is_ok());
+        assert!(tx.send(Event::BatchProgress(2, 3)).is_ok());
+        assert!(tx.send(Event::PlayError("play failed".into())).is_ok());
+
+        assert!(matches!(rx.try_recv(), Ok(Event::Done(message)) if message == "paused"));
+        assert!(matches!(rx.try_recv(), Ok(Event::Open(source)) if source == "new-download"));
+        assert!(matches!(rx.try_recv(), Ok(Event::Error(message)) if message == "action failed"));
+        assert!(matches!(rx.try_recv(), Ok(Event::BatchProgress(2, 3))));
+        assert!(matches!(rx.try_recv(), Ok(Event::PlayError(message)) if message == "play failed"));
+        assert!(matches!(rx.try_recv(), Ok(Event::State(state)) if state["sample"] == 19_999));
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn memory_retry_discards_the_previous_engines_refresh() {
+        let (tx, rx) = event_channel();
+        assert!(tx.send(Event::State(json!({"old_engine": true}))).is_ok());
+        assert!(tx.send(Event::Starting("restarting".into())).is_ok());
+        assert!(matches!(rx.try_recv(), Ok(Event::Starting(message)) if message == "restarting"));
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(tx.send(Event::State(json!({"new_engine": true}))).is_ok());
+        assert!(matches!(rx.try_recv(), Ok(Event::State(state)) if state["new_engine"] == true));
+    }
+
+    #[test]
+    fn memory_closed_ui_rejects_refreshes_and_action_responses() {
+        let (tx, rx) = event_channel();
+        assert!(tx.send(Event::State(json!({"sample": 0}))).is_ok());
+        drop(rx);
+        assert!(tx.refresh.lock().unwrap().event.is_none());
+        assert!(tx.send(Event::State(json!({"sample": 1}))).is_err());
+        assert!(
+            tx.send(Event::RefreshFailed(false, "offline".into()))
+                .is_err()
+        );
+        assert!(tx.send(Event::Done("done".into())).is_err());
     }
 }
 

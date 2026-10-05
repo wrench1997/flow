@@ -1188,6 +1188,10 @@ impl Engine {
         }
         self.entries.lock().unwrap().retain(|e| e.id != id);
         self.discovery.lock().unwrap().remove(id);
+        self.loading.lock().unwrap().remove(id);
+        self.completed_cache.lock().unwrap().remove(id);
+        self.peer_quality.lock().unwrap().remove(id);
+        self.recovery.lock().unwrap().remove(id);
         self.webseeds.lock().unwrap().remove(id);
         self.persist()?;
         self.event(
@@ -1233,6 +1237,7 @@ impl Engine {
                 (BTreeMap::new(), vec![])
             };
             let Ok(mut entry) = engine.entry(&task) else {
+                engine.finish_discovery(&task, "").await;
                 return;
             };
             // Preserve original trackers; use remaining slots for ranked candidates.
@@ -1302,14 +1307,25 @@ impl Engine {
                 entry.trackers.len(),
                 notes.join("；")
             );
-            engine.discovery.lock().unwrap().insert(
-                task.clone(),
-                json!({"running":false,"started":trackers::now(),"message":message}),
-            );
-            engine.event(&task, "info", "tracker_discovery", &message);
-            let _ = engine.persist();
+            engine.finish_discovery(&task, &message).await;
         });
         Ok(())
+    }
+
+    async fn finish_discovery(&self, id: &str, message: &str) {
+        // A query can finish long after removal. Serialize its final publication
+        // with removal so the existence check and cache update cannot race.
+        let _operation = self.operations.lock().await;
+        if self.entry(id).is_err() {
+            self.discovery.lock().unwrap().remove(id);
+            return;
+        }
+        self.discovery.lock().unwrap().insert(
+            id.into(),
+            json!({"running":false,"started":trackers::now(),"message":message}),
+        );
+        self.event(id, "info", "tracker_discovery", message);
+        let _ = self.persist();
     }
 
     // Completed, stopped tasks do not need thousands of writable file handles.
@@ -2412,6 +2428,221 @@ mod tests {
         engine.session.stop().await;
     }
     use super::*;
+    #[tokio::test]
+    async fn memory_delayed_tracker_completions_do_not_restore_removed_tasks() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path(), true).await.unwrap();
+        let mut completions = Vec::new();
+        let mut releases = Vec::new();
+        for cycle in 0..64 {
+            let id = format!("discovery-{cycle}");
+            engine.entries.lock().unwrap().push(Entry {
+                id: id.clone(),
+                source: "magnet:?xt=urn:btih:0000000000000000000000000000000000000000".into(),
+                save_path: temp.path().join("downloads").display().to_string(),
+                paused: true,
+                ..Default::default()
+            });
+            engine
+                .discovery
+                .lock()
+                .unwrap()
+                .insert(id.clone(), json!({"running":true}));
+            let (release, delayed) = oneshot::channel();
+            let query_engine = engine.clone();
+            let query_id = id.clone();
+            completions.push(tokio::spawn(async move {
+                delayed.await.unwrap();
+                query_engine
+                    .finish_discovery(&query_id, "late tracker response")
+                    .await;
+            }));
+            releases.push(release);
+            engine.action(&id, "remove", "keep").await.unwrap();
+            assert!(engine.discovery.lock().unwrap().is_empty());
+        }
+        // Release all old queries after task churn has removed their cache rows.
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        for completion in completions {
+            completion.await.unwrap();
+        }
+        assert!(engine.entries.lock().unwrap().is_empty());
+        assert!(engine.discovery.lock().unwrap().is_empty());
+        assert!(
+            engine
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|event| event["kind"] != "tracker_discovery")
+        );
+
+        // Queries for an existing task still publish their normal completion.
+        engine.entries.lock().unwrap().push(Entry {
+            id: "present".into(),
+            ..Default::default()
+        });
+        engine.finish_discovery("present", "query complete").await;
+        assert_eq!(
+            engine.discovery.lock().unwrap()["present"]["running"],
+            false
+        );
+        assert_eq!(
+            engine.events.lock().unwrap().back().unwrap()["kind"],
+            "tracker_discovery"
+        );
+        engine.session.stop().await;
+    }
+
+    #[tokio::test]
+    async fn memory_tracker_completion_serializes_with_task_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path(), true).await.unwrap();
+        let id = "removing-discovery";
+        engine.entries.lock().unwrap().push(Entry {
+            id: id.into(),
+            source: "magnet:?xt=urn:btih:0000000000000000000000000000000000000000".into(),
+            save_path: temp.path().join("downloads").display().to_string(),
+            paused: true,
+            ..Default::default()
+        });
+        engine
+            .discovery
+            .lock()
+            .unwrap()
+            .insert(id.into(), json!({"running":true}));
+        let operation = engine.operations.lock().await;
+        let (remove_started, removing) = oneshot::channel();
+        let remove_engine = engine.clone();
+        let removal = tokio::spawn(async move {
+            remove_started.send(()).unwrap();
+            remove_engine.action(id, "remove", "keep").await.unwrap();
+        });
+        // On this single-threaded runtime the remover queues for the operation
+        // lock before the query's final publication is scheduled behind it.
+        removing.await.unwrap();
+        let (query_started, querying) = oneshot::channel();
+        let query_engine = engine.clone();
+        let completion = tokio::spawn(async move {
+            query_started.send(()).unwrap();
+            query_engine
+                .finish_discovery(id, "late tracker response")
+                .await;
+        });
+        querying.await.unwrap();
+        assert!(!removal.is_finished());
+        assert!(!completion.is_finished());
+        assert_eq!(engine.discovery.lock().unwrap()[id]["running"], true);
+        drop(operation);
+        removal.await.unwrap();
+        completion.await.unwrap();
+        assert!(engine.entries.lock().unwrap().is_empty());
+        assert!(engine.discovery.lock().unwrap().is_empty());
+        assert_eq!(engine.events.lock().unwrap().len(), 1);
+        engine.session.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_repeated_pause_resume_releases_each_previous_live_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path(), true).await.unwrap();
+        let mut torrent =
+            b"d4:infod6:lengthi16384e4:name7:pending12:piece lengthi16384e6:pieces20:".to_vec();
+        torrent.extend_from_slice(&[0u8; 20]);
+        torrent.extend_from_slice(b"ee");
+        std::fs::write(engine.data.join("cycling.torrent"), &torrent).unwrap();
+        engine.entries.lock().unwrap().push(Entry {
+            id: "cycling".into(),
+            source: engine.data.join("cycling.torrent").display().to_string(),
+            save_path: temp.path().join("downloads").display().to_string(),
+            paused: true,
+            ..Default::default()
+        });
+        engine.load("cycling").await.unwrap();
+        let handle = engine.handle("cycling").unwrap();
+        handle.wait_until_initialized().await.unwrap();
+        for cycle in 0..32 {
+            engine.action("cycling", "resume", "").await.unwrap();
+            let live = handle.live().expect("resumed task has live state");
+            let old_live = Arc::downgrade(&live);
+            drop(live);
+            engine.snapshot("cycling");
+            engine.action("cycling", "pause", "").await.unwrap();
+            assert!(handle.is_paused());
+            assert!(handle.live().is_none());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while old_live.upgrade().is_some() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("pause cycle {cycle} retained old live resources"));
+        }
+        let removed_handle = Arc::downgrade(&handle);
+        engine.action("cycling", "remove", "keep").await.unwrap();
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while removed_handle.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("removal releases the handle and its background reconciler");
+        engine.session.stop().await;
+    }
+
+    #[tokio::test]
+    async fn memory_repeated_completed_task_removal_clears_task_caches() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(temp.path(), true).await.unwrap();
+        for cycle in 0..64 {
+            let id = format!("completed-{cycle}");
+            engine.entries.lock().unwrap().push(Entry {
+                id: id.clone(),
+                source: "magnet:?xt=urn:btih:0000000000000000000000000000000000000000".into(),
+                save_path: temp.path().join("downloads").display().to_string(),
+                paused: true,
+                ..Default::default()
+            });
+            engine.completed_cache.lock().unwrap().insert(
+                id.clone(),
+                json!({"total":1024,"files":[{"path":"large-file-list".repeat(1024)}]}),
+            );
+            engine
+                .loading
+                .lock()
+                .unwrap()
+                .insert(id.clone(), json!({"stage":"ready"}));
+            engine
+                .discovery
+                .lock()
+                .unwrap()
+                .insert(id.clone(), json!({"running":false}));
+            engine
+                .peer_quality
+                .lock()
+                .unwrap()
+                .insert(id.clone(), BTreeMap::new());
+            engine
+                .recovery
+                .lock()
+                .unwrap()
+                .insert(id.clone(), Default::default());
+            engine.action(&id, "remove", "keep").await.unwrap();
+            assert!(engine.entries.lock().unwrap().is_empty());
+            assert!(engine.completed_cache.lock().unwrap().is_empty());
+            assert!(engine.loading.lock().unwrap().is_empty());
+            assert!(engine.discovery.lock().unwrap().is_empty());
+            assert!(engine.peer_quality.lock().unwrap().is_empty());
+            assert!(engine.recovery.lock().unwrap().is_empty());
+        }
+        // Deletion messages are retained only in the bounded event history.
+        assert_eq!(engine.events.lock().unwrap().len(), 64);
+        engine.session.stop().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn completed_restore_uses_bitmap_without_opening_download_files() {
         let temp = tempfile::tempdir().unwrap();

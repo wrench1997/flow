@@ -1,13 +1,16 @@
+[CmdletBinding(DefaultParameterSetName='Signed')]
 param(
     [Parameter(Mandatory=$true)][string]$Executable,
     [Parameter(Mandatory=$true)][string]$Version,
     [Parameter(Mandatory=$true)][string]$OutputDirectory,
-    [Parameter(Mandatory=$true)][string]$SigningKey
+    [Parameter(Mandatory=$true,ParameterSetName='Signed')][string]$SigningKey,
+    [Parameter(Mandatory=$true,ParameterSetName='Manual')][switch]$ManualOnly
 )
 $ErrorActionPreference='Stop'
 $repository=Split-Path $PSScriptRoot
 New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
 $OutputDirectory=(Resolve-Path -LiteralPath $OutputDirectory).Path
+if($ManualOnly -and (Test-Path -LiteralPath (Join-Path $OutputDirectory 'update.json'))){throw 'Use a fresh output directory for a manual-only release'}
 if((Resolve-Path -LiteralPath $Executable).Path -ne (Join-Path $OutputDirectory 'Flow.exe')){Copy-Item -LiteralPath $Executable -Destination (Join-Path $OutputDirectory 'Flow.exe')}
 $toolTarget=if($env:CARGO_TARGET_DIR){$env:CARGO_TARGET_DIR}else{Join-Path $repository 'target'}
 & cargo build --release --locked --manifest-path (Join-Path $repository 'tools/uninstaller/Cargo.toml') --target-dir $toolTarget
@@ -33,10 +36,14 @@ $assets=Join-Path $portable 'assets'
 New-Item -ItemType Directory -Force $assets | Out-Null
 Copy-Item -LiteralPath (Join-Path $repository 'assets/flow-icon.png') -Destination $assets
 Compress-Archive -LiteralPath $portable -DestinationPath (Join-Path $OutputDirectory "Flow-$Version-windows-x64-portable.zip") -Force
-python (Join-Path $PSScriptRoot 'sign-update.py') --exe (Join-Path $OutputDirectory 'Flow.exe') --version $Version --key $SigningKey --out (Join-Path $OutputDirectory 'update.json')
-if($LASTEXITCODE -ne 0){throw 'Update signing failed'}
+if(-not $ManualOnly){
+    python (Join-Path $PSScriptRoot 'sign-update.py') --exe (Join-Path $OutputDirectory 'Flow.exe') --version $Version --key $SigningKey --out (Join-Path $OutputDirectory 'update.json')
+    if($LASTEXITCODE -ne 0){throw 'Update signing failed'}
+}
 foreach($name in @('setup-player.ps1','register-defaults.ps1')){Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $OutputDirectory}
-$names=@('Flow.exe',"Flow-Setup-$Version-x64.exe","Flow-$Version-windows-x64-portable.zip",'update.json','setup-player.ps1','register-defaults.ps1')
+$names=@('Flow.exe',"Flow-Setup-$Version-x64.exe","Flow-$Version-windows-x64-portable.zip",'setup-player.ps1','register-defaults.ps1')
+if(-not $ManualOnly){$names+='update.json'}
 $lines=foreach($name in $names){$h=Get-FileHash -LiteralPath (Join-Path $OutputDirectory $name); "$($h.Hash.ToLower())  $name"}
 $lines | Set-Content -LiteralPath (Join-Path $OutputDirectory 'SHA256SUMS.txt') -Encoding ascii
 Write-Output "Release packages ready in $OutputDirectory"
+if($ManualOnly){Write-Output 'Manual download/install only: no signed in-app update manifest was produced.'}

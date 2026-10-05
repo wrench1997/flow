@@ -62,7 +62,7 @@ pub enum WriterRequest {
     Message(Message<'static>),
     UtMetadata(UtMetadata<ByteBufOwned>),
     UtPex(UtPex<ByteBufOwned>),
-    ReadChunkRequest(ChunkInfo),
+    ReadChunkRequest(ChunkInfo, tokio::sync::OwnedSemaphorePermit),
     Disconnect(anyhow::Result<()>),
 }
 
@@ -374,6 +374,9 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                 tokio::task::yield_now().await;
 
                 let mut uploaded_add = None;
+                // Keep an accepted upload's budget until both its disk read and
+                // socket write finish. Errors and cancellation drop it as well.
+                let mut upload_permit = None;
 
                 trace!("about to send: {:?}", &req);
                 let ext_msg_ids = &|| {
@@ -394,7 +397,8 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                         Message::Extended(ExtendedMessage::UtPex(ut_pex.as_borrowed()))
                             .serialize(&mut *write_buf, ext_msg_ids)?
                     }
-                    WriterRequest::ReadChunkRequest(chunk) => {
+                    WriterRequest::ReadChunkRequest(chunk, permit) => {
+                        upload_permit = Some(permit);
                         #[allow(unused_mut)]
                         let mut skip_reading_for_e2e_tests = false;
 
@@ -461,6 +465,7 @@ impl<H: PeerConnectionHandler> PeerConnection<H> {
                 if let Some(uploaded_add) = uploaded_add {
                     self.handler.on_uploaded_bytes(uploaded_add)
                 }
+                drop(upload_permit);
             }
 
             // For type inference.

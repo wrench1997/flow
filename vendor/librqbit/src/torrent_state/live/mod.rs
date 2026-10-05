@@ -92,7 +92,7 @@ use peer_binary_protocol::{
 };
 use tokio::sync::{
     Notify, OwnedSemaphorePermit, Semaphore,
-    mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+    mpsc::{Receiver, Sender, unbounded_channel},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
@@ -186,6 +186,35 @@ impl TorrentStateLocked {
 
 const FLUSH_BITV_EVERY_BYTES: u64 = 16 * 1024 * 1024;
 
+// This budget covers all accepted uploads, including rate-limited requests,
+// requests queued in peer writers, and the chunk currently being written.
+const MAX_PENDING_UPLOAD_REQUESTS: usize = 4096;
+type UploadRequest = (PeerTx, ChunkInfo, OwnedSemaphorePermit);
+
+fn upload_request_channel() -> (
+    Sender<UploadRequest>,
+    Receiver<UploadRequest>,
+    Arc<Semaphore>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel(MAX_PENDING_UPLOAD_REQUESTS);
+    (tx, rx, Arc::new(Semaphore::new(MAX_PENDING_UPLOAD_REQUESTS)))
+}
+
+async fn enqueue_upload_request(
+    tx: &Sender<UploadRequest>,
+    slots: Arc<Semaphore>,
+    peer_tx: PeerTx,
+    chunk: ChunkInfo,
+) -> anyhow::Result<()> {
+    let permit = tokio::select! {
+        _ = tx.closed() => bail!("upload scheduler is closed"),
+        permit = slots.acquire_owned() => permit?,
+    };
+    tx.send((peer_tx, chunk, permit))
+        .await
+        .context("upload scheduler is closed")
+}
+
 pub enum AddIncomingPeerResult {
     Added,
     AlreadyActive,
@@ -209,7 +238,7 @@ pub struct TorrentStateLive {
     peer_semaphore: Arc<Semaphore>,
 
     // The queue for peer manager to connect to them.
-    peer_queue_tx: UnboundedSender<SocketAddr>,
+    peer_queue_tx: Sender<SocketAddr>,
 
     finished_notify: Notify,
     new_pieces_notify: Notify,
@@ -223,10 +252,8 @@ pub struct TorrentStateLive {
     pub(crate) streams: Arc<TorrentStreams>,
     have_broadcast_tx: tokio::sync::broadcast::Sender<ValidPieceIndex>,
 
-    ratelimit_upload_tx: tokio::sync::mpsc::UnboundedSender<(
-        tokio::sync::mpsc::UnboundedSender<WriterRequest>,
-        ChunkInfo,
-    )>,
+    ratelimit_upload_tx: Sender<UploadRequest>,
+    upload_request_semaphore: Arc<Semaphore>,
     ratelimits: Limits,
 }
 
@@ -236,7 +263,8 @@ impl TorrentStateLive {
         fatal_errors_tx: tokio::sync::oneshot::Sender<anyhow::Error>,
         cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<Self>> {
-        let (peer_queue_tx, peer_queue_rx) = unbounded_channel();
+        let (peer_queue_tx, peer_queue_rx) =
+            tokio::sync::mpsc::channel(peers::MAX_REMEMBERED_PEERS);
         let session = paused
             .shared
             .session
@@ -265,10 +293,8 @@ impl TorrentStateLive {
 
         let (have_broadcast_tx, _) = tokio::sync::broadcast::channel(128);
 
-        let (ratelimit_upload_tx, ratelimit_upload_rx) = tokio::sync::mpsc::unbounded_channel::<(
-            tokio::sync::mpsc::UnboundedSender<WriterRequest>,
-            ChunkInfo,
-        )>();
+        let (ratelimit_upload_tx, ratelimit_upload_rx, upload_request_semaphore) =
+            upload_request_channel();
         let ratelimits = Limits::new(paused.shared.options.ratelimits);
 
         let state = Arc::new(TorrentStateLive {
@@ -279,6 +305,7 @@ impl TorrentStateLive {
                 stats: Default::default(),
                 states: Default::default(),
                 live_outgoing_peers: Default::default(),
+                admission: Default::default(),
             },
             _locked: RwLock::new(TorrentStateLocked {
                 pieces: Some(PieceTracker::new(paused.chunk_tracker)),
@@ -308,6 +335,7 @@ impl TorrentStateLive {
                 .map(|_| RwLock::new(()))
                 .collect(),
             ratelimit_upload_tx,
+            upload_request_semaphore,
             ratelimits,
         });
 
@@ -390,6 +418,10 @@ impl TorrentStateLive {
             }
         };
 
+        let Some(admission) = self.peers.admission_guard(checked_peer.addr) else {
+            debug!("limit of remembered peers reached, dropping incoming peer");
+            return Ok(AddIncomingPeerResult::ConcurrencyLimitReached);
+        };
         let counters = match self.peers.states.entry(checked_peer.addr) {
             Entry::Occupied(mut occ) => {
                 let peer = occ.get_mut();
@@ -426,6 +458,7 @@ impl TorrentStateLive {
                 counters
             }
         };
+        drop(admission);
         atomic_inc(&counters.incoming_connections);
 
         self.spawn(
@@ -448,12 +481,9 @@ impl TorrentStateLive {
 
     async fn task_upload_scheduler(
         self: Arc<Self>,
-        mut rx: tokio::sync::mpsc::UnboundedReceiver<(
-            tokio::sync::mpsc::UnboundedSender<WriterRequest>,
-            ChunkInfo,
-        )>,
+        mut rx: Receiver<UploadRequest>,
     ) -> crate::Result<()> {
-        while let Some((tx, ci)) = rx.recv().await {
+        while let Some((tx, ci, permit)) = rx.recv().await {
             tokio::select! {
                 _ = tx.closed() => {
                     continue;
@@ -472,7 +502,7 @@ impl TorrentStateLive {
                     }
                 }
             }
-            let _ = tx.send(WriterRequest::ReadChunkRequest(ci));
+            let _ = tx.send(WriterRequest::ReadChunkRequest(ci, permit));
         }
         Ok(())
     }
@@ -613,14 +643,14 @@ impl TorrentStateLive {
 
     async fn task_peer_adder(
         self: Arc<Self>,
-        mut peer_queue_rx: UnboundedReceiver<SocketAddr>,
+        mut peer_queue_rx: Receiver<SocketAddr>,
     ) -> crate::Result<()> {
         let state = self;
         loop {
             let addr = peer_queue_rx.recv().await.ok_or(Error::TorrentIsNotLive)?;
             if state.shared.options.disable_upload() && state.is_finished_and_no_active_streams() {
                 debug!(?addr, "ignoring peer as we are finished");
-                state.peers.mark_peer_not_needed(addr);
+                state.peers.mark_queued_peer_not_needed(addr);
                 continue;
             }
 
@@ -632,11 +662,13 @@ impl TorrentStateLive {
 
             if session.ipv4_only && addr.is_ipv6() {
                 debug!(?addr, "skipping ipv6 peer (ipv4_only=true)");
+                state.peers.mark_queued_peer_not_needed(addr);
                 continue;
             }
 
             if addr.port() == 0 {
                 debug!(?addr, "skipping peer with port 0");
+                state.peers.mark_queued_peer_not_needed(addr);
                 continue;
             }
 
@@ -647,6 +679,7 @@ impl TorrentStateLive {
                     .blocked_outgoing
                     .fetch_add(1, Ordering::Relaxed);
                 debug!(?addr, "blocked outgoing connection (by the blacklist)");
+                state.peers.mark_queued_peer_not_needed(addr);
                 continue;
             }
 
@@ -661,6 +694,7 @@ impl TorrentStateLive {
                     .blocked_outgoing
                     .fetch_add(1, Ordering::Relaxed);
                 debug!(?addr, "blocked outgoing connection (by the allowlist)");
+                state.peers.mark_queued_peer_not_needed(addr);
                 continue;
             }
 
@@ -734,16 +768,30 @@ impl TorrentStateLive {
     }
 
     pub(crate) fn add_peer_if_not_seen(&self, addr: SocketAddr) -> crate::Result<bool> {
-        match self.peers.add_if_not_seen(addr) {
-            Some(handle) => handle,
-            None => return Ok(false),
-        };
-
-        self.peer_queue_tx
-            .send(addr)
-            .ok()
-            .ok_or(Error::TorrentIsNotLive)?;
-        Ok(true)
+        let session = self
+            .shared
+            .session
+            .upgrade()
+            .ok_or(Error::SessionDestroyed)?;
+        if addr.port() != 0
+            && !(session.ipv4_only && addr.is_ipv6())
+            && (session.blocklist.has(addr.ip())
+                || session.allowlist.as_ref().is_some_and(|l| !l.has(addr.ip())))
+        {
+            session
+                .stats
+                .counters
+                .blocked_outgoing
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        discover_peer(
+            &self.peers,
+            &self.peer_queue_tx,
+            addr,
+            session.ipv4_only,
+            &session.blocklist,
+            session.allowlist.as_ref(),
+        )
     }
 
     pub fn stats_snapshot(&self) -> StatsSnapshot {
@@ -948,13 +996,16 @@ impl TorrentStateLive {
     }
 
     pub(crate) fn reconnect_all_not_needed_peers(&self) {
-        self.peers
+        let addresses: Vec<_> = self.peers
             .states
             .iter_mut()
             .filter_map(|mut p| p.value_mut().reconnect_not_needed_peer(&self.peers))
-            .map(|socket_addr| self.peer_queue_tx.send(socket_addr))
-            .take_while(|r| r.is_ok())
-            .last();
+            .collect();
+        for addr in addresses {
+            if queue_peer(&self.peers, &self.peer_queue_tx, addr).is_err() {
+                break;
+            }
+        }
     }
 
     async fn task_send_pex_to_peer(
@@ -1108,6 +1159,7 @@ impl PeerConnectionHandler for &'_ PeerHandler {
         match message {
             Message::Request(request) => {
                 self.on_download_request(request)
+                    .await
                     .context("on_download_request")?;
             }
             Message::Bitfield(b) => self
@@ -1443,11 +1495,7 @@ impl PeerHandler {
                         })
                         .unwrap_or(false);
                     if should_requeue {
-                        self.state
-                            .peer_queue_tx
-                            .send(handle)
-                            .ok()
-                            .ok_or(Error::TorrentIsNotLive)?;
+                        queue_peer(&self.state.peers, &self.state.peer_queue_tx, handle)?;
                     }
                     Ok::<_, Error>(())
                 },
@@ -1524,7 +1572,7 @@ impl PeerHandler {
         result
     }
 
-    fn on_download_request(&self, request: Request) -> anyhow::Result<()> {
+    async fn on_download_request(&self, request: Request) -> anyhow::Result<()> {
         if self.state.torrent().options.disable_upload() {
             anyhow::bail!("upload disabled, but peer requested a piece")
         }
@@ -1553,22 +1601,24 @@ impl PeerHandler {
             }
         };
 
-        if !self
-            .state
-            .lock_read("is_chunk_ready_to_upload")
-            .get_chunks()?
-            .is_chunk_ready_to_upload(&chunk_info)
-        {
+        let ready_to_upload = {
+            let locked = self.state.lock_read("is_chunk_ready_to_upload");
+            locked.get_chunks()?.is_chunk_ready_to_upload(&chunk_info)
+        };
+        if !ready_to_upload {
             anyhow::bail!(
                 "got request for a chunk that is not ready to upload. chunk {:?}",
                 chunk_info
             );
         }
 
-        self.state
-            .ratelimit_upload_tx
-            .send((self.tx.clone(), chunk_info))?;
-        Ok(())
+        enqueue_upload_request(
+            &self.state.ratelimit_upload_tx,
+            self.state.upload_request_semaphore.clone(),
+            self.tx.clone(),
+            chunk_info,
+        )
+        .await
     }
 
     fn on_have(&self, have: u32) {
@@ -2075,8 +2125,7 @@ impl PeerHandler {
     }
 
     fn on_pex_message(&self, msg: UtPex<ByteBuf<'_>>) {
-        msg.dropped_peers()
-            .chain(msg.added_peers())
+        msg.added_peers()
             .for_each(|peer| {
                 self.state
                     .add_peer_if_not_seen(peer.addr)
@@ -2144,4 +2193,396 @@ fn format_peer_client_name(value: &ByteBuf<'_>) -> Option<String> {
     }
 
     Some(client_name)
+}
+
+fn queue_peer(
+    peers: &PeerStates,
+    tx: &Sender<SocketAddr>,
+    addr: SocketAddr,
+) -> crate::Result<bool> {
+    match tx.try_send(addr) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            // A stale queue entry can remain after an incoming connection or
+            // reconnect. Saturation must not leave an unqueued Queued record.
+            peers.mark_queued_peer_not_needed(addr);
+            match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => Ok(false),
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => Err(Error::TorrentIsNotLive),
+            }
+        }
+    }
+}
+
+fn discover_peer(
+    peers: &PeerStates,
+    tx: &Sender<SocketAddr>,
+    addr: SocketAddr,
+    ipv4_only: bool,
+    blocklist: &crate::ip_ranges::IpRanges,
+    allowlist: Option<&crate::ip_ranges::IpRanges>,
+) -> crate::Result<bool> {
+    // Reject before reserving inventory or queue capacity. Otherwise a flood of
+    // addresses we cannot connect to would prevent valid discovery forever.
+    if addr.port() == 0
+        || (ipv4_only && addr.is_ipv6())
+        || blocklist.has(addr.ip())
+        || allowlist.is_some_and(|list| !list.has(addr.ip()))
+    {
+        return Ok(false);
+    }
+    if peers.add_if_not_seen(addr).is_none() {
+        return Ok(false);
+    }
+    queue_peer(peers, tx, addr)
+}
+
+#[cfg(test)]
+mod discovery_queue_tests {
+    use super::*;
+    use crate::ip_ranges::IpRanges;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn peers() -> PeerStates {
+        PeerStates {
+            session_stats: Default::default(),
+            live_outgoing_peers: Default::default(),
+            stats: Default::default(),
+            states: Default::default(),
+            admission: Default::default(),
+        }
+    }
+
+    #[test]
+    fn memory_saturated_discovery_queue_stays_bounded_and_cleans_unqueued_state() {
+        let peers = peers();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 4242));
+        peers.add_if_not_seen(addr);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(peers::MAX_REMEMBERED_PEERS);
+        for _ in 0..peers::MAX_REMEMBERED_PEERS {
+            assert!(queue_peer(&peers, &tx, addr).unwrap());
+        }
+        for _ in 0..peers::MAX_REMEMBERED_PEERS {
+            assert!(!queue_peer(&peers, &tx, addr).unwrap());
+        }
+        assert_eq!(rx.len(), peers::MAX_REMEMBERED_PEERS);
+        assert_eq!(peers.stats().queued, 0);
+        assert_eq!(peers.stats().not_needed, 1);
+        rx.try_recv().unwrap();
+        peers.with_peer_mut(addr, "test_requeue", |peer| {
+            peer.set_state(PeerState::Queued, &peers);
+        });
+        assert!(queue_peer(&peers, &tx, addr).unwrap());
+        assert_eq!(peers.stats().queued, 1);
+    }
+
+    #[test]
+    fn memory_closed_discovery_queue_releases_pending_addresses() {
+        let peers = peers();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 4242));
+        peers.add_if_not_seen(addr);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        assert!(queue_peer(&peers, &tx, addr).unwrap());
+        drop(rx);
+        assert!(matches!(
+            queue_peer(&peers, &tx, addr),
+            Err(Error::TorrentIsNotLive)
+        ));
+        assert_eq!(peers.stats().queued, 0);
+        assert_eq!(peers.stats().not_needed, 1);
+    }
+
+    #[test]
+    fn memory_full_discovery_queue_preserves_active_peer_state() {
+        let peers = peers();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 4242));
+        peers.add_if_not_seen(addr);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        assert!(queue_peer(&peers, &tx, addr).unwrap());
+        let (_rx, _tx) = peers.mark_peer_connecting(addr).unwrap();
+        assert!(!queue_peer(&peers, &tx, addr).unwrap());
+        assert_eq!(peers.stats().connecting, 1);
+        assert_eq!(peers.stats().not_needed, 0);
+    }
+
+    #[test]
+    fn memory_filtered_discovery_cannot_starve_valid_peers() {
+        let empty = IpRanges::default();
+        let blocked = IpRanges::new([Ipv4Addr::new(10, 0, 0, 0)..Ipv4Addr::new(11, 0, 0, 0)], []);
+        let allowed = IpRanges::new(
+            [Ipv4Addr::new(127, 0, 0, 0)..Ipv4Addr::new(128, 0, 0, 0)],
+            [],
+        );
+        for policy in 0..4 {
+            let peers = peers();
+            let (tx, rx) = tokio::sync::mpsc::channel(peers::MAX_REMEMBERED_PEERS);
+            let blocklist = if policy == 2 { &blocked } else { &empty };
+            let allowlist = (policy == 3).then_some(&allowed);
+            for index in 0..peers::MAX_REMEMBERED_PEERS * 2 {
+                let addr = if policy == 0 {
+                    SocketAddr::from((Ipv6Addr::from(index as u128 + 1), 4242))
+                } else {
+                    SocketAddr::from((
+                        Ipv4Addr::from(0x0a00_0000 + index as u32),
+                        if policy == 1 { 0 } else { 4242 },
+                    ))
+                };
+                assert!(
+                    !discover_peer(&peers, &tx, addr, policy == 0, blocklist, allowlist).unwrap()
+                );
+            }
+            assert!(peers.states.is_empty());
+            assert_eq!(peers.stats().queued, 0);
+            assert!(rx.is_empty());
+            let valid = SocketAddr::from(([127, 0, 0, 1], 4242));
+            assert!(discover_peer(&peers, &tx, valid, policy == 0, blocklist, allowlist).unwrap());
+            assert_eq!(peers.states.len(), 1);
+            assert_eq!(rx.len(), 1);
+        }
+    }
+
+    #[test]
+    fn memory_filtered_discovery_and_defensive_cleanup_preserve_active_peers() {
+        let peers = peers();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+        peers.add_if_not_seen(addr);
+        let (_rx, _tx) = peers.mark_peer_connecting(addr).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        assert!(!discover_peer(&peers, &tx, addr, false, &IpRanges::default(), None).unwrap());
+        peers.mark_queued_peer_not_needed(addr);
+        assert_eq!(peers.stats().connecting, 1);
+        peers.with_peer_mut(addr, "test_live", |peer| {
+            peer.connecting_to_live(Id20::default(), &peers, ConnectionKind::Tcp);
+        });
+        assert!(!discover_peer(&peers, &tx, addr, false, &IpRanges::default(), None).unwrap());
+        peers.mark_queued_peer_not_needed(addr);
+        assert_eq!(peers.stats().live, 1);
+        assert_eq!(peers.stats().not_needed, 0);
+        assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn memory_defensive_cleanup_releases_queued_inventory_slots() {
+        let peers = peers();
+        for port in 1..=peers::MAX_REMEMBERED_PEERS {
+            let addr = SocketAddr::from(([127, 0, 0, 1], port as u16));
+            peers.add_if_not_seen(addr);
+            peers.mark_queued_peer_not_needed(addr);
+        }
+        assert_eq!(peers.stats().queued, 0);
+        assert_eq!(
+            peers.stats().not_needed as usize,
+            peers::MAX_REMEMBERED_PEERS
+        );
+        let valid = SocketAddr::from(([127, 0, 0, 2], 4242));
+        assert!(peers.add_if_not_seen(valid).is_some());
+        assert_eq!(peers.states.len(), peers::MAX_REMEMBERED_PEERS);
+    }
+}
+
+#[cfg(test)]
+mod upload_queue_tests {
+    use std::task::Poll;
+
+    use super::*;
+
+    fn chunk(index: usize) -> ChunkInfo {
+        let lengths = Lengths::new(
+            CHUNK_SIZE as u64 * (MAX_PENDING_UPLOAD_REQUESTS + 1) as u64,
+            CHUNK_SIZE,
+        )
+        .unwrap();
+        let index = lengths.validate_piece_index(index as u32).unwrap();
+        lengths.iter_chunk_infos(index).next().unwrap()
+    }
+
+    fn filled_upload_queue() -> (
+        Sender<UploadRequest>,
+        Receiver<UploadRequest>,
+        PeerTx,
+        Arc<Semaphore>,
+    ) {
+        let (tx, rx, slots) = upload_request_channel();
+        let (peer_tx, _peer_rx) = unbounded_channel();
+        for index in 0..MAX_PENDING_UPLOAD_REQUESTS {
+            let permit = slots.clone().try_acquire_owned().unwrap();
+            tx.try_send((peer_tx.clone(), chunk(index), permit))
+                .unwrap();
+        }
+        (tx, rx, peer_tx, slots)
+    }
+
+    #[tokio::test]
+    async fn memory_stalled_upload_queue_is_bounded_and_resumes_in_order() {
+        let (tx, mut rx, peer_tx, slots) = filled_upload_queue();
+        let pending = enqueue_upload_request(
+            &tx,
+            slots.clone(),
+            peer_tx,
+            chunk(MAX_PENDING_UPLOAD_REQUESTS),
+        );
+        tokio::pin!(pending);
+        assert!(matches!(futures::poll!(&mut pending), Poll::Pending));
+        assert_eq!(rx.len(), MAX_PENDING_UPLOAD_REQUESTS);
+
+        assert_eq!(rx.recv().await.unwrap().1.piece_index.get(), 0);
+        tokio::time::timeout(Duration::from_secs(1), &mut pending)
+            .await
+            .expect("upload producer did not resume after capacity became available")
+            .unwrap();
+        assert_eq!(rx.len(), MAX_PENDING_UPLOAD_REQUESTS);
+        for index in 1..=MAX_PENDING_UPLOAD_REQUESTS {
+            assert_eq!(rx.recv().await.unwrap().1.piece_index.get(), index as u32);
+        }
+        assert_eq!(rx.len(), 0);
+        assert_eq!(slots.available_permits(), MAX_PENDING_UPLOAD_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn memory_dropped_upload_receiver_unblocks_pending_producer() {
+        let (tx, rx, peer_tx, slots) = filled_upload_queue();
+        let pending = enqueue_upload_request(
+            &tx,
+            slots.clone(),
+            peer_tx,
+            chunk(MAX_PENDING_UPLOAD_REQUESTS),
+        );
+        tokio::pin!(pending);
+        assert!(matches!(futures::poll!(&mut pending), Poll::Pending));
+        drop(rx);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), &mut pending)
+                .await
+                .expect("upload producer remained blocked after scheduler stopped")
+                .is_err()
+        );
+        assert_eq!(slots.available_permits(), MAX_PENDING_UPLOAD_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn memory_pause_cancels_upload_producer_waiting_for_capacity() {
+        let (tx, rx, peer_tx, slots) = filled_upload_queue();
+        let token = CancellationToken::new();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        // Use the same wrapper as each live peer task, which drops a blocked
+        // message reader when the torrent's pause token is cancelled.
+        let producer = spawn_with_cancel::<anyhow::Error>(
+            tracing::Span::none(),
+            "memory_blocked_upload_producer",
+            token.clone(),
+            async move {
+                started_tx.send(()).unwrap();
+                enqueue_upload_request(&tx, slots, peer_tx, chunk(MAX_PENDING_UPLOAD_REQUESTS))
+                    .await?;
+                Ok(())
+            },
+        );
+        started_rx.await.unwrap();
+        assert_eq!(rx.len(), MAX_PENDING_UPLOAD_REQUESTS);
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), producer)
+            .await
+            .expect("pause did not cancel the blocked upload producer")
+            .unwrap();
+        assert!(
+            rx.is_closed(),
+            "cancelled producer retained its upload sender"
+        );
+        assert_eq!(rx.len(), MAX_PENDING_UPLOAD_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn memory_stalled_peer_writer_shares_the_upload_capacity_budget() {
+        let (tx, mut rx, slots) = upload_request_channel();
+        let (peer_tx, mut peer_rx) = unbounded_channel();
+        for index in 0..MAX_PENDING_UPLOAD_REQUESTS {
+            enqueue_upload_request(&tx, slots.clone(), peer_tx.clone(), chunk(index))
+                .await
+                .unwrap();
+        }
+        // A fast scheduler can move everything downstream, but its permits
+        // remain attached to the same uploads in the stalled writer queue.
+        while let Ok((writer, chunk, permit)) = rx.try_recv() {
+            writer
+                .send(WriterRequest::ReadChunkRequest(chunk, permit))
+                .unwrap();
+        }
+        assert_eq!(rx.len(), 0);
+        assert_eq!(peer_rx.len(), MAX_PENDING_UPLOAD_REQUESTS);
+        assert_eq!(slots.available_permits(), 0);
+
+        let pending = enqueue_upload_request(
+            &tx,
+            slots.clone(),
+            peer_tx,
+            chunk(MAX_PENDING_UPLOAD_REQUESTS),
+        );
+        tokio::pin!(pending);
+        assert!(matches!(futures::poll!(&mut pending), Poll::Pending));
+        let inflight = peer_rx.recv().await.unwrap();
+        // Selecting the next upload does not free capacity before disk/socket
+        // I/O has finished or the request is cancelled.
+        assert!(matches!(futures::poll!(&mut pending), Poll::Pending));
+        drop(inflight);
+        tokio::time::timeout(Duration::from_secs(1), &mut pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rx.len(), 1);
+        drop(peer_rx);
+        assert_eq!(slots.available_permits(), MAX_PENDING_UPLOAD_REQUESTS - 1);
+        drop(rx);
+        assert_eq!(slots.available_permits(), MAX_PENDING_UPLOAD_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn memory_cancelled_upload_writer_releases_inflight_capacity() {
+        let (tx, mut rx, slots) = upload_request_channel();
+        let (peer_tx, mut peer_rx) = unbounded_channel();
+        for index in 0..MAX_PENDING_UPLOAD_REQUESTS {
+            enqueue_upload_request(&tx, slots.clone(), peer_tx.clone(), chunk(index))
+                .await
+                .unwrap();
+        }
+        while let Ok((writer, chunk, permit)) = rx.try_recv() {
+            writer
+                .send(WriterRequest::ReadChunkRequest(chunk, permit))
+                .unwrap();
+        }
+
+        let inflight = peer_rx.recv().await.unwrap();
+        let token = CancellationToken::new();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let writer = spawn_with_cancel::<anyhow::Error>(
+            tracing::Span::none(),
+            "memory_stalled_upload_writer",
+            token.clone(),
+            async move {
+                let _inflight = inflight;
+                started_tx.send(()).unwrap();
+                std::future::pending().await
+            },
+        );
+        started_rx.await.unwrap();
+        let pending = enqueue_upload_request(
+            &tx,
+            slots.clone(),
+            peer_tx,
+            chunk(MAX_PENDING_UPLOAD_REQUESTS),
+        );
+        tokio::pin!(pending);
+        assert!(matches!(futures::poll!(&mut pending), Poll::Pending));
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), writer)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), &mut pending)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(peer_rx);
+        drop(rx);
+        assert_eq!(slots.available_permits(), MAX_PENDING_UPLOAD_REQUESTS);
+    }
 }

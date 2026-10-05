@@ -470,6 +470,44 @@ mod tests {
         .unwrap()
     }
     #[tokio::test]
+    async fn memory_repeated_pause_resume_and_removal_release_http_workers() {
+        let (base, _, _, server) = fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let limits = session(dir.path()).await;
+        limits
+            .ratelimits
+            .set_download_bps(std::num::NonZeroU32::new(1024));
+        let job = Job::open(
+            dir.path(),
+            "http-cycling",
+            &format!("{base}/file.bin"),
+            &dir.path().join("downloads"),
+        )
+        .unwrap();
+        for _ in 0..64 {
+            job.start(limits.clone()).await.unwrap();
+            // Let the spawned transfer enter its request/limiter before cancelling.
+            tokio::task::yield_now().await;
+            job.stop().await.unwrap();
+            assert!(job.worker.lock().await.is_none());
+            assert!(!job.state.lock().unwrap().running);
+            assert_eq!(job.state.lock().unwrap().rate, 0);
+            assert_eq!(
+                Arc::strong_count(&job),
+                1,
+                "stopped worker retained its job"
+            );
+        }
+        job.start(limits.clone()).await.unwrap();
+        let removed = Arc::downgrade(&job);
+        job.remove("keep").await.unwrap();
+        drop(job);
+        assert!(removed.upgrade().is_none(), "removed HTTP job was retained");
+        limits.stop().await;
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn pause_restart_range_resume_and_delete_modes() {
         let (base, payload, ranges, server) = fixture().await;
         let dir = tempfile::tempdir().unwrap();

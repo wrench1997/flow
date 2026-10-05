@@ -1,7 +1,13 @@
 [package]
 name = "flow-download"
-version = "0.4.16"
+version = "0.4.17"
 edition = "2024"
+
+[workspace]
+members = ["vendor/librqbit"]
+default-members = ["."]
+exclude = ["tools/installer", "tools/uninstaller"]
+resolver = "3"
 
 [features]
 standalone-installer = []

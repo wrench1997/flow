@@ -25,7 +25,6 @@ documentation = "https://docs.rs/librqbit"
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/ikatson/rqbit"
-resolver = "2"
 
 [features]
 _disable_disk_write_net_benchmark = []

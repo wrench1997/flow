@@ -8,6 +8,15 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
+## Long-running memory control (0.4.17)
+
+- Hidden or busy windows retain only the latest state refresh while operation responses remain ordered.
+- Slow-disk resume persistence retains the in-flight and latest pending bitmaps, including final progress on pause/exit.
+- Each BT task remembers at most 4096 candidate peers and queues at most 4096 discovery or upload requests. Active/retrying peers are preserved; full upload queues apply backpressure, cancelled on pause.
+- Task deletion releases completed file lists, loading state and peer sampling caches.
+- Run `powershell -File scripts/test-memory.ps1 -RepeatCount 10` for repeated memory regressions covering stalled consumers, peer floods, slow disk and pause/resume resource release.
+- Version 0.4.17 supports manual download/install. The original update signing key is unavailable on this release host, so this release has no in-app update manifest. Signature verification remains enabled; fully exit Flow before upgrading manually.
+
 ## Installation behavior
 
 - Fix Windows canonical path handling when creating shortcuts, including Chinese names and spaces.
