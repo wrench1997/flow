@@ -696,9 +696,13 @@ impl Engine {
         // while waiting for hashing/network work.
         let weak = Arc::downgrade(self);
         let task_id = id.to_owned();
+        let stopped = self.session.cancellation_token().clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                tokio::select! {
+                    _ = stopped.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                }
                 let Some(engine) = weak.upgrade() else {
                     break;
                 };
@@ -885,7 +889,7 @@ impl Engine {
             if action == "pause" {
                 job.stop().await?;
             } else {
-                job.start(self.session.clone()).await?;
+                job.resume(self.session.clone()).await?;
             }
             if let Some(e) = self.entries.lock().unwrap().iter_mut().find(|e| e.id == id) {
                 e.paused = action == "pause";
@@ -1600,7 +1604,7 @@ impl Engine {
             if let Some(job) = self.http_jobs.lock().unwrap().get(&e.id).cloned() {
                 let s = job.state.lock().unwrap().clone();
                 item["name"] = json!(s.name);
-                if crate::media::playable(&s.name) {
+                if crate::media::playable(&s.name) && (!s.complete || s.error.is_empty()) {
                     item["media_files"] = json!([{"index":0,"path":s.name,"size":s.total,
                         "source":if s.complete {job.destination.display().to_string()} else {e.source.clone()}}]);
                 }
@@ -1616,7 +1620,9 @@ impl Engine {
                 });
                 item["download_rate"] = json!(s.rate);
                 item["error"] = json!(s.error);
-                item["state"] = json!(if s.complete {
+                item["state"] = json!(if !s.error.is_empty() {
+                    "error"
+                } else if s.complete {
                     "complete"
                 } else if e.paused {
                     "paused"
@@ -2392,16 +2398,21 @@ pub async fn serve(
         result=&mut server=>result?,
         _=&mut stop=>{
             startup_stage(&root,"正在停止接口并保存任务");
+            engine.session.cancellation_token().cancel();
             let _=shutdown.send(());
             // A player waiting for missing pieces must not hold shutdown forever.
             let _=tokio::time::timeout(Duration::from_secs(3),&mut server).await;
         }
     }
+    engine.session.cancellation_token().cancel();
     restore_task.abort();
     recovery_task.abort();
     snapshot_task.abort();
     maintenance_task.abort();
-    engine.persist()?;
+    for task in [restore_task, recovery_task, snapshot_task, maintenance_task] {
+        let _ = task.await;
+    }
+    let persisted = engine.persist();
     engine.webseeds.lock().unwrap().clear();
     let jobs: Vec<_> = engine.http_jobs.lock().unwrap().values().cloned().collect();
     for job in jobs {
@@ -2411,11 +2422,50 @@ pub async fn serve(
     startup_stage(&root, "引擎已退出");
     drop(engine);
     drop(lock);
-    Ok(())
+    persisted
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn missing_http_file_reports_error_and_continue_recovers_restored_file() {
+        let root = tempfile::tempdir().unwrap();
+        let engine = Engine::new(root.path(), true).await.unwrap();
+        let directory = root.path().join("downloads");
+        std::fs::write(
+            engine.data.join("missing.http.json"),
+            br#"{"done":8,"total":8,"complete":true,"ready_to_finish":true}"#,
+        )
+        .unwrap();
+        engine.entries.lock().unwrap().push(Entry {
+            id: "missing".into(),
+            source: "http://localhost/file.mkv".into(),
+            save_path: directory.display().to_string(),
+            ..Default::default()
+        });
+        engine.load("missing").await.unwrap();
+        let snapshot = engine.snapshot("missing");
+        let task = &snapshot["tasks"][0];
+        assert_eq!(task["state"], "error");
+        assert_eq!(task["progress"], 1.0);
+        assert!(task["error"].as_str().unwrap().contains("file-missing.mkv"));
+        assert!(
+            task.get("media_files").is_none(),
+            "offered playback of a missing file"
+        );
+
+        std::fs::write(directory.join("file-missing.mkv"), b"complete").unwrap();
+        engine.action("missing", "resume", "").await.unwrap();
+        let snapshot = engine.snapshot("missing");
+        assert_eq!(snapshot["tasks"][0]["state"], "complete");
+        assert_eq!(snapshot["tasks"][0]["error"], "");
+        assert_eq!(
+            snapshot["tasks"][0]["media_files"].as_array().unwrap().len(),
+            1
+        );
+        engine.session.stop().await;
+    }
+
     #[tokio::test]
     async fn persisted_blacklist_is_loaded_by_native_engine() {
         let root = tempfile::tempdir().unwrap();

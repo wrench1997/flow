@@ -1,5 +1,14 @@
 # Flow 下载工作台
 
+## 退出与 HTTP 完成状态修复（0.4.18）
+
+- 前往 [Flow 0.4.18 发布页面](https://github.com/wrench1997/flow/releases/tag/v0.4.18) 下载安装包、绿色 ZIP 或单独的主程序。本版手动升级，不提供应用内更新清单；替换前完全退出 Flow，保留原数据和下载目录。
+- 托盘“停止下载并退出”会唤醒隐藏或最小化窗口并直接触发关闭，不依赖下一次界面刷新。
+- 退出会取消正在等待响应的本机接口请求，先关闭播放器，再等待下载引擎释放文件；后台恢复和维护任务停止后再保存任务。
+- 已完成的 HTTP 文件不在原位置时，显示缺失路径和恢复方法，不再同时标记为完成或提供无效播放入口。放回原文件后点击“继续”可恢复状态；文件确已删除时，点击“继续”会重新下载。启动时不会自动重新下载这些文件，也不会覆盖原位置上大小不同的文件。
+- 本机回归测试覆盖接口响应挂起时退出、HTTP/BT 文件释放、退出后重启，以及已完成 HTTP 文件缺失和恢复。
+- Windows 隐藏/最小化窗口退出测试：`cargo test --locked --bin flow-download tray::tests::shutdown_hidden_and_minimized_windows_without_ui_event_delivery -- --ignored --exact --nocapture`。该测试打开独立临时窗口，不使用现有任务数据。
+
 ## 长时间运行的内存控制（0.4.17）
 
 - 窗口隐藏或界面繁忙时，状态刷新仅保留最新快照；操作结果仍按顺序送达。
@@ -131,7 +140,7 @@
 
 ## 构建与运行
 
-**直接使用成品：** 前往 [Flow 0.4.17 发布页面](https://github.com/wrench1997/flow/releases/tag/v0.4.17) 下载安装包、绿色 ZIP 或 `Flow.exe`。本版需手动升级，发布附件同时提供 SHA-256 校验文件。
+**直接使用成品：** 前往 [Flow 0.4.18 发布页面](https://github.com/wrench1997/flow/releases/tag/v0.4.18) 下载安装包、绿色 ZIP 或 `Flow.exe`。本版需手动升级，发布附件同时提供 SHA-256 校验文件。
 
 当前支持的桌面目标为 **Windows x64（MSVC）**。源码构建需要 Rust/Cargo，以及包含 Windows SDK 的 Visual Studio C++ 构建工具。
 

@@ -141,6 +141,16 @@ impl Player {
             let _ = tx.send(command);
         }
     }
+    pub fn stop(&mut self) {
+        self.remember();
+        self.commands.take();
+        self.pending_play = None;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.current_key.clear();
+    }
     fn remember(&mut self) {
         if self.current_key.is_empty() {
             return;
@@ -380,11 +390,7 @@ fn clock(seconds: f64) -> String {
 }
 impl Drop for Player {
     fn drop(&mut self) {
-        self.remember();
-        if let Some(child) = &mut self.child {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.stop();
     }
 }
 
@@ -392,7 +398,7 @@ impl Drop for Player {
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "requires the optional mpv runtime"]
+    #[ignore = "requires runtime/mpv or FLOW_TEST_MPV_RUNTIME pointing to an existing mpv folder"]
     fn real_mpv_decodes_seeks_and_pauses_generated_audio() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("fixture.wav");
@@ -412,7 +418,22 @@ mod tests {
         wav.extend(size.to_le_bytes());
         wav.resize(44 + size as usize, 0);
         std::fs::write(&path, wav).unwrap();
-        let mut player = Player::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let runtime = std::env::var_os("FLOW_TEST_MPV_RUNTIME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime/mpv"));
+        let isolated_runtime = temp.path().join("runtime/mpv");
+        std::fs::create_dir_all(&isolated_runtime).unwrap();
+        for name in ["mpv.exe", "d3dcompiler_43.dll"] {
+            let source = runtime.join(name);
+            if source.exists() {
+                std::fs::copy(source, isolated_runtime.join(name)).unwrap();
+            }
+        }
+        assert!(
+            isolated_runtime.join("mpv.exe").exists(),
+            "optional mpv runtime not found"
+        );
+        let mut player = Player::new(temp.path().into());
         player.play(path.display().to_string(), "fixture".into(), None);
         assert!(player.message.is_empty(), "{}", player.message);
         fn wait_property(player: &mut Player, name: &str, predicate: impl Fn(&Value) -> bool) {
@@ -447,5 +468,30 @@ mod tests {
         player.command(json!(["set_property", "speed", 1.5]));
         wait_property(&mut player, "speed", |v| v.as_f64() == Some(1.5));
         player.current_key.clear(); // A fixture must not enter the user's history.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            assert!(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .share_mode(0)
+                    .open(&path)
+                    .is_err()
+            );
+        }
+        player.stop();
+        assert!(player.child.is_none());
+        assert!(player.commands.is_none());
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        options
+            .open(path)
+            .expect("player still holds the media file after stop");
     }
 }

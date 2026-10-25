@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "flow-download"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1565,6 +1565,7 @@ dependencies = [
  "url",
  "uuid",
  "winresource",
+ "winit",
 ]
 
 [[package]]

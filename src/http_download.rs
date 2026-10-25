@@ -101,9 +101,7 @@ impl Job {
             state.complete = true;
         }
         if state.complete {
-            if !destination.is_file() || std::fs::metadata(&destination)?.len() != state.done {
-                state.error = "已完成的 HTTP 文件缺失或大小已改变".into();
-            }
+            state.error = completed_file_error(&destination, state.done)?.unwrap_or_default();
         } else {
             anyhow::ensure!(
                 !destination.exists(),
@@ -154,6 +152,29 @@ impl Job {
             let _ = job.save();
         }));
         Ok(())
+    }
+    pub async fn resume(self: &Arc<Self>, limits: Arc<librqbit::Session>) -> Result<()> {
+        // A missing completed file is kept as a visible error on startup.
+        // Only an explicit resume may start downloading it again.
+        if self.state.lock().unwrap().complete {
+            crate::file_ops::validate_files(
+                self.destination.parent().unwrap(),
+                &[self.destination.clone(), self.part.clone()],
+            )?;
+            {
+                let mut state = self.state.lock().unwrap();
+                state.error = completed_file_error(&self.destination, state.done)?.unwrap_or_default();
+                if !state.error.is_empty() {
+                    anyhow::ensure!(!self.destination.exists(), "{}", state.error);
+                    state.complete = false;
+                    state.ready_to_finish = false;
+                    state.done = std::fs::metadata(&self.part).map(|m| m.len()).unwrap_or(0);
+                    state.error.clear();
+                }
+            }
+            self.save()?;
+        }
+        self.start(limits).await
     }
     pub async fn stop(&self) -> Result<()> {
         if let Some(worker) = self.worker.lock().await.take() {
@@ -341,6 +362,20 @@ impl Job {
         Ok(())
     }
 }
+fn completed_file_error(path: &Path, size: u64) -> Result<Option<String>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() == size => Ok(None),
+        Ok(_) => Ok(Some(format!(
+            "已下载文件大小已改变：{}。请将原文件放回；如需重新下载，请先移走现有文件再点击继续。",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Some(format!(
+            "已下载文件不在原位置：{}。如已移动或重命名，请放回原位置；点击继续可重新下载。",
+            path.display()
+        ))),
+        Err(error) => Err(error).with_context(|| format!("无法检查已下载文件：{}", path.display())),
+    }
+}
 fn finish_file(source: &Path, destination: &Path) -> Result<()> {
     #[cfg(windows)]
     {
@@ -469,6 +504,99 @@ mod tests {
         .await
         .unwrap()
     }
+    #[test]
+    fn restored_completed_file_clears_old_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("downloads");
+        let job = Job::open(dir.path(), "restored", "http://localhost/file.mkv", &out).unwrap();
+        std::fs::write(&job.destination, b"complete").unwrap();
+        {
+            let mut state = job.state.lock().unwrap();
+            state.done = 8;
+            state.total = Some(8);
+            state.complete = true;
+            state.ready_to_finish = true;
+            state.error = "已完成的 HTTP 文件缺失或大小已改变".into();
+        }
+        job.save().unwrap();
+        drop(job);
+        let restored =
+            Job::open(dir.path(), "restored", "http://localhost/file.mkv", &out).unwrap();
+        assert!(restored.state.lock().unwrap().error.is_empty());
+        assert!(restored.state.lock().unwrap().complete);
+        // Completing a download must not retain a handle on the final file.
+        std::fs::rename(&restored.destination, out.join("moved.mkv")).unwrap();
+    }
+
+    #[test]
+    fn restart_after_final_rename_recovers_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("downloads");
+        let job = Job::open(dir.path(), "renamed", "http://localhost/file.mkv", &out).unwrap();
+        std::fs::write(&job.destination, b"complete").unwrap();
+        {
+            let mut state = job.state.lock().unwrap();
+            state.done = 8;
+            state.total = Some(8);
+            state.ready_to_finish = true;
+            state.error = "final state write failed".into();
+        }
+        job.save().unwrap();
+        drop(job);
+        let recovered =
+            Job::open(dir.path(), "renamed", "http://localhost/file.mkv", &out).unwrap();
+        let state = recovered.state.lock().unwrap();
+        assert!(state.complete);
+        assert!(state.error.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_complete_file_requires_explicit_resume_and_preserves_changed_file() {
+        let (base, payload, _, server) = fixture().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("downloads");
+        let limits = session(dir.path()).await;
+        let job = Job::open(dir.path(), "missing", &format!("{base}/file.bin"), &out).unwrap();
+        job.transfer(limits.clone()).await.unwrap();
+        let path = job.destination.clone();
+        let moved = out.join("moved.bin");
+        std::fs::rename(&path, &moved).unwrap();
+        drop(job);
+
+        let job = Job::open(dir.path(), "missing", &format!("{base}/file.bin"), &out).unwrap();
+        assert!(!job.state.lock().unwrap().error.is_empty());
+        job.start(limits.clone()).await.unwrap();
+        assert!(
+            job.worker.lock().await.is_none(),
+            "startup re-downloaded a removed file"
+        );
+        // An explicit retry must not overwrite a different file in the old path.
+        std::fs::write(&path, b"unrelated content").unwrap();
+        assert!(job.resume(limits.clone()).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"unrelated content");
+        std::fs::remove_file(&path).unwrap();
+        job.resume(limits.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while job.state.lock().unwrap().running {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(job.state.lock().unwrap().complete);
+        assert!(job.state.lock().unwrap().error.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
+        assert_eq!(std::fs::read(&moved).unwrap(), payload);
+
+        // A file put back in place also recovers on Continue, without a transfer.
+        job.state.lock().unwrap().error = "old missing-file error".into();
+        job.resume(limits.clone()).await.unwrap();
+        assert!(job.state.lock().unwrap().error.is_empty());
+        job.stop().await.unwrap();
+        limits.stop().await;
+        server.abort();
+    }
+
     #[tokio::test]
     async fn memory_repeated_pause_resume_and_removal_release_http_workers() {
         let (base, _, _, server) = fixture().await;

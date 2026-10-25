@@ -1,6 +1,6 @@
 [package]
 name = "flow-download"
-version = "0.4.17"
+version = "0.4.18"
 edition = "2024"
 
 [workspace]
@@ -41,6 +41,9 @@ sevenz-rust2 = { version = "0.23.0", default-features = false, features = ["util
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(windows)'.dev-dependencies]
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 
 [patch.crates-io]
 librqbit = { path = "vendor/librqbit" }

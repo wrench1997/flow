@@ -8,6 +8,15 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
+## Exit and completed HTTP file recovery (0.4.18)
+
+- Download the installer, portable ZIP or standalone executable from the [Flow 0.4.18 release](https://github.com/wrench1997/flow/releases/tag/v0.4.18). This is a manual upgrade, with no signed in-app update manifest; fully exit Flow before replacing the program and keep existing data and download folders.
+- Tray exit wakes hidden/minimized windows and posts a native close event instead of depending on the next UI refresh.
+- Exit cancels pending local API requests, closes the player before waiting for the download engine, and stops restoration/maintenance tasks before saving.
+- Missing completed HTTP files show their expected path and recovery actions, with no conflicting completed status or invalid playback action. Restore the original file and click Resume to clear the error, or click Resume to download a missing file again. Startup does not automatically re-download removed files, and retry never overwrites a different-sized file.
+- Local regression tests cover stalled API responses, HTTP/BT file-handle release, shutdown/restart, and completed HTTP file recovery.
+- Windows hidden/minimized window smoke test: `cargo test --locked --bin flow-download tray::tests::shutdown_hidden_and_minimized_windows_without_ui_event_delivery -- --ignored --exact --nocapture`. It opens isolated temporary windows without using existing task data.
+
 ## Long-running memory control (0.4.17)
 
 - Hidden or busy windows retain only the latest state refresh while operation responses remain ordered.
@@ -126,7 +135,7 @@ Copies without the built-in updater need a manual upgrade first. Installation do
 
 ## Build and run
 
-**Ready-to-run Windows build:** download the installer, portable ZIP or `Flow.exe` from the [Flow 0.4.17 release](https://github.com/wrench1997/flow/releases/tag/v0.4.17). This release requires a manual upgrade. SHA-256 checksums are included.
+**Ready-to-run Windows build:** download the installer, portable ZIP or `Flow.exe` from the [Flow 0.4.18 release](https://github.com/wrench1997/flow/releases/tag/v0.4.18). This release requires a manual upgrade. SHA-256 checksums are included.
 
 Supported desktop target: **Windows x64 (MSVC)**. Building requires Rust/Cargo and Visual Studio C++ build tools with the Windows SDK.
 

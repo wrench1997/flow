@@ -3,30 +3,46 @@ use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
 use tokio::sync::oneshot;
 
 #[derive(Clone, Default)]
-pub struct Shutdown(std::sync::Arc<std::sync::Mutex<(bool, Option<oneshot::Sender<()>>)>>);
+pub struct Shutdown {
+    current: std::sync::Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
+    cancellation: tokio_util::sync::CancellationToken,
+}
 impl Shutdown {
     pub fn request(&self) {
-        let mut state = self.0.lock().unwrap();
-        state.0 = true;
-        if let Some(sender) = state.1.take() {
-            let _ = sender.send(());
-        }
+        self.cancellation.cancel();
+        self.stop_current();
     }
     fn stop_current(&self) {
-        if let Some(sender) = self.0.lock().unwrap().1.take() {
+        if let Some(sender) = self.current.lock().unwrap().take() {
             let _ = sender.send(());
         }
     }
     pub fn requested(&self) -> bool {
-        self.0.lock().unwrap().0
+        self.cancellation.is_cancelled()
     }
     fn register(&self, sender: oneshot::Sender<()>) {
-        let mut state = self.0.lock().unwrap();
-        if state.0 {
+        let mut current = self.current.lock().unwrap();
+        if self.requested() {
             let _ = sender.send(());
         } else {
-            state.1 = Some(sender);
+            *current = Some(sender);
         }
+    }
+
+    // Cancel an in-flight API request as well as the engine. In particular, a
+    // 60-second remove request must not keep the UI worker alive during exit.
+    pub fn wait_for<F: std::future::Future>(
+        &self,
+        runtime: &tokio::runtime::Runtime,
+        request: F,
+    ) -> Option<F::Output> {
+        runtime.block_on(async {
+            tokio::select! {
+                biased;
+                _ = self.cancellation.cancelled() => None,
+                result = request => Some(result),
+            }
+        })
     }
 }
 
@@ -182,6 +198,55 @@ mod tests {
         assert!(rx.try_recv().is_ok());
     }
     #[test]
+    fn shutdown_cancels_inflight_api_headers_and_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for send_headers in [false, true] {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let shutdown = Shutdown::default();
+            let (accepted, received) = mpsc::channel();
+            let cancel = shutdown.clone();
+            let worker = thread::spawn(move || {
+                received.recv_timeout(Duration::from_secs(5)).unwrap();
+                cancel.request();
+            });
+            let started = std::time::Instant::now();
+            let result = shutdown.wait_for(&runtime, async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("http://{}", listener.local_addr().unwrap());
+                tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = [0u8; 4096];
+                    socket.read(&mut request).await.unwrap();
+                    if send_headers {
+                        socket
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+                            .await
+                            .unwrap();
+                    }
+                    accepted.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                });
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_secs(60))
+                    .build()
+                    .unwrap()
+                    .get(url)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<serde_json::Value>()
+                    .await
+            });
+            assert!(result.is_none(), "exit waited for the HTTP timeout");
+            assert!(started.elapsed() < Duration::from_secs(3));
+            worker.join().unwrap();
+        }
+    }
+    #[test]
     fn out_of_band_shutdown_stops_api_and_releases_directory_lock() {
         let root = tempfile::tempdir().unwrap();
         let shutdown = Shutdown::default();
@@ -199,6 +264,121 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
         let restarted = Backend::start_in(root.path().into(), true).unwrap();
         drop(restarted);
+    }
+
+    #[test]
+    fn shutdown_releases_active_http_and_bt_files_before_restart() {
+        use std::io::{Read, Write};
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let downloads = root.path().join("downloads");
+        std::fs::create_dir_all(&data).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = format!("http://{}/file.bin", listener.local_addr().unwrap());
+        let (stop, stopped) = mpsc::channel();
+        let fixture = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 131072\r\nETag: \"fixture\"\r\n\r\n",
+                )
+                .unwrap();
+            socket.write_all(&vec![42; 65536]).unwrap();
+            let _ = stopped.recv_timeout(Duration::from_secs(15));
+        });
+        let mut torrent =
+            b"d4:infod6:lengthi16384e4:name7:pending12:piece lengthi16384e6:pieces20:".to_vec();
+        torrent.extend_from_slice(&[0; 20]);
+        torrent.extend_from_slice(b"ee");
+        std::fs::write(data.join("paused.torrent"), torrent).unwrap();
+        let entries = vec![
+            crate::engine::Entry {
+                id: "http".into(),
+                source,
+                save_path: downloads.display().to_string(),
+                ..Default::default()
+            },
+            crate::engine::Entry {
+                id: "paused".into(),
+                source: data.join("paused.torrent").display().to_string(),
+                save_path: downloads.display().to_string(),
+                paused: true,
+                ..Default::default()
+            },
+        ];
+        std::fs::write(
+            data.join("tasks-rust.json"),
+            serde_json::to_vec(&entries).unwrap(),
+        )
+        .unwrap();
+        let backend = Backend::start_in(root.path().into(), true).unwrap();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let state: serde_json::Value = client
+                .get(format!("{}/api/state", backend.base))
+                .bearer_auth(&backend.token)
+                .send()
+                .unwrap()
+                .json()
+                .unwrap();
+            let tasks = state["tasks"].as_array().unwrap();
+            if tasks
+                .iter()
+                .any(|t| t["id"] == "http" && t["done"].as_u64().unwrap() > 0)
+                && tasks
+                    .iter()
+                    .any(|t| t["id"] == "paused" && t["state"] == "paused")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "downloads did not start: {state}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        let files = [downloads.join(".flow-http.part"), downloads.join("pending")];
+        #[cfg(windows)]
+        for file in &files {
+            use std::os::windows::fs::OpenOptionsExt;
+            assert!(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .share_mode(0)
+                    .open(file)
+                    .is_err()
+            );
+        }
+        let started = std::time::Instant::now();
+        drop(backend);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        for file in files {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.share_mode(0);
+            }
+            options
+                .open(file)
+                .expect("download file still in use after shutdown");
+        }
+        let saved: crate::http_download::State =
+            serde_json::from_slice(&std::fs::read(data.join("http.http.json")).unwrap()).unwrap();
+        assert!(saved.done > 0 && saved.done < 131072);
+        assert!(saved.error.is_empty());
+        drop(Backend::start_in(root.path().into(), true).unwrap());
+        let _ = stop.send(());
+        fixture.join().unwrap();
     }
 
     #[test]

@@ -347,6 +347,10 @@ impl DownloadApp {
         let shutdown = backend::Shutdown::default();
         let worker_shutdown = shutdown.clone();
         let worker = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("API worker runtime");
             'startup: loop {
                 if worker_shutdown.requested() {
                     return;
@@ -367,6 +371,9 @@ impl DownloadApp {
                 };
                 let mut last_stage = String::new();
                 loop {
+                    if worker_shutdown.requested() {
+                        return;
+                    }
                     if let Some(result) = backend.poll_ready() {
                         match result {
                             Ok(()) => break,
@@ -413,7 +420,7 @@ impl DownloadApp {
                 let base = backend.base.clone();
                 let token = backend.token.clone();
 
-                let client = reqwest::blocking::Client::builder()
+                let client = reqwest::Client::builder()
                     .timeout(Duration::from_secs(4))
                     .no_proxy()
                     .build()
@@ -448,12 +455,18 @@ impl DownloadApp {
                         }
                         Ok(Command::Select(id)) => selected = id,
                         Ok(Command::Play(id, index, title)) => {
-                            let result = client
-                                .post(format!("{base}/api/play"))
-                                .bearer_auth(&token)
-                                .json(&json!({"id":id,"index":index}))
-                                .send()
-                                .and_then(|r| r.json::<Value>());
+                            let Some(result) = worker_shutdown.wait_for(&runtime, async {
+                                client
+                                    .post(format!("{base}/api/play"))
+                                    .bearer_auth(&token)
+                                    .json(&json!({"id":id,"index":index}))
+                                    .send()
+                                    .await?
+                                    .json::<Value>()
+                                    .await
+                            }) else {
+                                return;
+                            };
                             match result {
                                 Ok(v) if v["path"].is_string() => {
                                     let _ = events.send(Event::Play(
@@ -477,13 +490,21 @@ impl DownloadApp {
                             for (index, id) in ids.into_iter().enumerate() {
                                 let _ = events.send(Event::BatchProgress(index + 1, total));
                                 ctx.request_repaint();
-                                let result = client
-                                    .post(format!("{base}/api/action"))
-                                    .bearer_auth(&token)
-                                    .timeout(Duration::from_secs(60))
-                                    .json(&json!({"id":id,"action":"remove","delete_mode":mode}))
-                                    .send()
-                                    .and_then(|r| r.json::<Value>());
+                                let Some(result) = worker_shutdown.wait_for(&runtime, async {
+                                    client
+                                        .post(format!("{base}/api/action"))
+                                        .bearer_auth(&token)
+                                        .timeout(Duration::from_secs(60))
+                                        .json(&json!({
+                                            "id":id, "action":"remove", "delete_mode":mode
+                                        }))
+                                        .send()
+                                        .await?
+                                        .json::<Value>()
+                                        .await
+                                }) else {
+                                    return;
+                                };
                                 match result {
                                     Ok(v) if v.get("error").is_none() => {}
                                     Ok(v) => failed.push(format!("{id}: {}", text(&v, "error"))),
@@ -503,15 +524,23 @@ impl DownloadApp {
                             let _ = events.send(Event::Error(message));
                         }
                         Ok(Command::Post(path, data)) => {
-                            let result = client
-                                .post(format!("{base}{path}"))
-                                .bearer_auth(&token)
-                                .json(&data)
-                                .send()
-                                .and_then(|r| r.json::<Value>());
+                            let Some(result) = worker_shutdown.wait_for(&runtime, async {
+                                client
+                                    .post(format!("{base}{path}"))
+                                    .bearer_auth(&token)
+                                    .json(&data)
+                                    .send()
+                                    .await?
+                                    .json::<Value>()
+                                    .await
+                            }) else {
+                                return;
+                            };
                             match result {
                                 Ok(v) if v.get("error").is_none() => {
-                                    let _ = events.send(Event::Done(v["message"].as_str().unwrap_or("操作成功").to_owned()));
+                                    let _ = events.send(Event::Done(
+                                        v["message"].as_str().unwrap_or("操作成功").to_owned(),
+                                    ));
                                 }
                                 Ok(v) => {
                                     let _ = events.send(Event::Error(text(&v, "error")));
@@ -527,13 +556,19 @@ impl DownloadApp {
                     if worker_shutdown.requested() {
                         return;
                     }
-                    let response = client
-                        .get(format!("{base}/api/state"))
-                        .query(&[("selected", &selected)])
-                        .bearer_auth(&token)
-                        .send()
-                        .and_then(|r| r.error_for_status())
-                        .and_then(|r| r.json::<Value>());
+                    let Some(response) = worker_shutdown.wait_for(&runtime, async {
+                        client
+                            .get(format!("{base}/api/state"))
+                            .query(&[("selected", &selected)])
+                            .bearer_auth(&token)
+                            .send()
+                            .await?
+                            .error_for_status()?
+                            .json::<Value>()
+                            .await
+                    }) else {
+                        return;
+                    };
                     let event = match response {
                         Ok(state) => {
                             clipboard_enabled.store(
@@ -548,13 +583,18 @@ impl DownloadApp {
                             if worker_shutdown.requested() {
                                 return;
                             }
-                            let alive = client
-                                .get(format!("{base}/api/health"))
-                                .bearer_auth(&token)
-                                .timeout(Duration::from_secs(2))
-                                .send()
-                                .and_then(|r| r.error_for_status())
-                                .is_ok();
+                            let Some(alive) = worker_shutdown.wait_for(&runtime, async {
+                                client
+                                    .get(format!("{base}/api/health"))
+                                    .bearer_auth(&token)
+                                    .timeout(Duration::from_secs(2))
+                                    .send()
+                                    .await
+                                    .and_then(|r| r.error_for_status())
+                                    .is_ok()
+                            }) else {
+                                return;
+                            };
                             Event::RefreshFailed(
                                 alive,
                                 if alive {
@@ -962,6 +1002,11 @@ impl DownloadApp {
 
 impl eframe::App for DownloadApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.shutdown.requested() {
+            self.exit_requested = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(crate::i18n::t(
             "Flow · 下载工作台",
         )));
@@ -1963,13 +2008,13 @@ impl eframe::App for DownloadApp {
 impl Drop for DownloadApp {
     fn drop(&mut self) {
         self.shutdown.request();
+        self.player.stop();
         let _ = self.tx.send(Command::Shutdown);
         self.clipboard_stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(worker) = self.clipboard_worker.take() {
             let _ = worker.join();
         }
-        let _ = self.tx.send(Command::Shutdown);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
