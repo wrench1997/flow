@@ -8,6 +8,12 @@ English · [简体中文](README.zh-CN.md)
 
 One executable starts both the desktop interface and embedded download engine. No Python installation or separate backend service is required.
 
+## New signed update channel (0.4.19)
+
+- Manually install [Flow 0.4.19](https://github.com/wrench1997/flow/releases/tag/v0.4.19) once, retaining existing data, runtime and download folders. Earlier builds embed the old public key and cannot cross this key rotation through in-app updates.
+- From 0.4.19, `update-v2.json` provides subsequent updates with enforced signatures, size and SHA-256 checks. GitHub Latest points to the current release; the legacy `update.json` preserves the original signed 0.4.16 manifest and no longer advances.
+- When a channel manifest is older than the installed build, the updater reports both versions instead of claiming the installation is the latest.
+
 ## Exit and completed HTTP file recovery (0.4.18)
 
 - Download the installer, portable ZIP or standalone executable from the [Flow 0.4.18 release](https://github.com/wrench1997/flow/releases/tag/v0.4.18). This is a manual upgrade, with no signed in-app update manifest; fully exit Flow before replacing the program and keep existing data and download folders.
@@ -135,7 +141,7 @@ Copies without the built-in updater need a manual upgrade first. Installation do
 
 ## Build and run
 
-**Ready-to-run Windows build:** download the installer, portable ZIP or `Flow.exe` from the [Flow 0.4.18 release](https://github.com/wrench1997/flow/releases/tag/v0.4.18). This release requires a manual upgrade. SHA-256 checksums are included.
+**Ready-to-run Windows build:** download the installer, portable ZIP or `Flow.exe` from the [Flow 0.4.19 release](https://github.com/wrench1997/flow/releases/tag/v0.4.19). Earlier versions need one manual installation before using the new signed update channel. SHA-256 checksums are included.
 
 Supported desktop target: **Windows x64 (MSVC)**. Building requires Rust/Cargo and Visual Studio C++ build tools with the Windows SDK.
 
@@ -154,6 +160,18 @@ cargo fmt --check
 ```
 
 The repository includes source and application assets only. Executables, downloads, local task state, caches, and temporary files are excluded. The Windows build statically links the C/C++ runtime; users of the built executable do not need Python, Rust, or a separate Visual C++ runtime installation.
+
+### Release signing key
+
+The new private key is stored locally at `%USERPROFILE%\.codex\secrets\flow\update-v2.dpapi`, encrypted with Windows current-user DPAPI, outside the checkout and build folders. It normally requires the original computer and Windows account to decrypt; this is not a cloud backup. Arrange an off-device key backup before reinstalling Windows rather than relying only on this encrypted file.
+
+Normal releases reuse this key:
+
+```powershell
+.\scripts\package-release.ps1 -Executable target\release\flow-download.exe -Version 0.4.19 -OutputDirectory output\release-0.4.19
+```
+
+`-SigningKey` continues to accept existing PEM files and also accepts the DPAPI file. Packaging signs `update-v2.json` and includes the frozen legacy `update.json`. Never attach the private key to a release or paste it into chat. `scripts/update_signing.py` creates the initial key and refuses to overwrite an existing file.
 
 ## Settings and behavior
 

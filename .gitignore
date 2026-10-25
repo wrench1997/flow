@@ -33,6 +33,7 @@ self-check.json
 !.env.example
 *.pem
 *.key
+*.dpapi
 .vscode/
 .idea/
 .DS_Store

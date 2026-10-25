@@ -3,14 +3,14 @@ param(
     [Parameter(Mandatory=$true)][string]$Executable,
     [Parameter(Mandatory=$true)][string]$Version,
     [Parameter(Mandatory=$true)][string]$OutputDirectory,
-    [Parameter(Mandatory=$true,ParameterSetName='Signed')][string]$SigningKey,
+    [Parameter(ParameterSetName='Signed')][string]$SigningKey=(Join-Path $env:USERPROFILE '.codex/secrets/flow/update-v2.dpapi'),
     [Parameter(Mandatory=$true,ParameterSetName='Manual')][switch]$ManualOnly
 )
 $ErrorActionPreference='Stop'
 $repository=Split-Path $PSScriptRoot
 New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
 $OutputDirectory=(Resolve-Path -LiteralPath $OutputDirectory).Path
-if($ManualOnly -and (Test-Path -LiteralPath (Join-Path $OutputDirectory 'update.json'))){throw 'Use a fresh output directory for a manual-only release'}
+if($ManualOnly -and ((Test-Path -LiteralPath (Join-Path $OutputDirectory 'update.json')) -or (Test-Path -LiteralPath (Join-Path $OutputDirectory 'update-v2.json')))){throw 'Use a fresh output directory for a manual-only release'}
 if((Resolve-Path -LiteralPath $Executable).Path -ne (Join-Path $OutputDirectory 'Flow.exe')){Copy-Item -LiteralPath $Executable -Destination (Join-Path $OutputDirectory 'Flow.exe')}
 $toolTarget=if($env:CARGO_TARGET_DIR){$env:CARGO_TARGET_DIR}else{Join-Path $repository 'target'}
 & cargo build --release --locked --manifest-path (Join-Path $repository 'tools/uninstaller/Cargo.toml') --target-dir $toolTarget
@@ -37,12 +37,14 @@ New-Item -ItemType Directory -Force $assets | Out-Null
 Copy-Item -LiteralPath (Join-Path $repository 'assets/flow-icon.png') -Destination $assets
 Compress-Archive -LiteralPath $portable -DestinationPath (Join-Path $OutputDirectory "Flow-$Version-windows-x64-portable.zip") -Force
 if(-not $ManualOnly){
-    python (Join-Path $PSScriptRoot 'sign-update.py') --exe (Join-Path $OutputDirectory 'Flow.exe') --version $Version --key $SigningKey --out (Join-Path $OutputDirectory 'update.json')
+    python (Join-Path $PSScriptRoot 'sign-update.py') --exe (Join-Path $OutputDirectory 'Flow.exe') --version $Version --key $SigningKey --out (Join-Path $OutputDirectory 'update-v2.json')
     if($LASTEXITCODE -ne 0){throw 'Update signing failed'}
+    # Preserve the v1 endpoint for already-installed clients; only v2 advances.
+    Copy-Item -LiteralPath (Join-Path $repository 'assets/legacy-update-v1.json') -Destination (Join-Path $OutputDirectory 'update.json')
 }
 foreach($name in @('setup-player.ps1','register-defaults.ps1')){Copy-Item -LiteralPath (Join-Path $repository $name) -Destination $OutputDirectory}
 $names=@('Flow.exe',"Flow-Setup-$Version-x64.exe","Flow-$Version-windows-x64-portable.zip",'setup-player.ps1','register-defaults.ps1')
-if(-not $ManualOnly){$names+='update.json'}
+if(-not $ManualOnly){$names+=@('update.json','update-v2.json')}
 $lines=foreach($name in $names){$h=Get-FileHash -LiteralPath (Join-Path $OutputDirectory $name); "$($h.Hash.ToLower())  $name"}
 $lines | Set-Content -LiteralPath (Join-Path $OutputDirectory 'SHA256SUMS.txt') -Encoding ascii
 Write-Output "Release packages ready in $OutputDirectory"

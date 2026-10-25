@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 const MANIFEST_URL: &str =
-    "https://github.com/wrench1997/flow/releases/latest/download/update.json";
+    "https://github.com/wrench1997/flow/releases/latest/download/update-v2.json";
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Config {
@@ -291,8 +291,16 @@ impl Updater {
                                     self.status = format!("发现新版本 {}", manifest.version);
                                     self.candidate = Some((manifest, bytes));
                                     self.open = true;
-                                } else {
+                                } else if version(&manifest.version).ok()
+                                    == version(env!("CARGO_PKG_VERSION")).ok()
+                                {
                                     self.status = "当前已是最新版本".into();
+                                } else {
+                                    self.status = format!(
+                                        "当前安装 {}；更新通道清单为 {}，可打开发布页查看手动版本",
+                                        env!("CARGO_PKG_VERSION"),
+                                        manifest.version
+                                    );
                                 }
                             }
                             Err(error) => self.status = error,
@@ -470,6 +478,65 @@ pub fn report_helper_error(message: &str) {
 mod tests {
     use super::*;
     use ed25519_dalek::Signer;
+    #[test]
+    fn update_status_distinguishes_older_equal_and_newer_manifests() {
+        for (available, expected_newer) in [
+            ("0.4.18", false),
+            (env!("CARGO_PKG_VERSION"), false),
+            ("99.0.0", true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut updater = Updater::new(root.path().into());
+            updater.auto_started = true;
+            let (sender, receiver) = mpsc::channel();
+            updater.rx = Some(receiver);
+            let manifest = Manifest {
+                version: available.into(),
+                url: format!("https://github.com/wrench1997/flow/releases/download/v{available}/Flow.exe"),
+                sha256: "a".repeat(64),
+                size: 123,
+            };
+            sender.send(Event::Checked(Ok((manifest, Vec::new())))).unwrap();
+            let context = egui::Context::default();
+            let _ = context.run(Default::default(), |ctx| {
+                updater.ui(ctx);
+            });
+            assert_eq!(updater.candidate.is_some(), expected_newer);
+            if available == env!("CARGO_PKG_VERSION") {
+                assert_eq!(updater.status, "当前已是最新版本");
+            } else {
+                assert_ne!(updater.status, "当前已是最新版本");
+                assert!(updater.status.contains(available));
+            }
+        }
+    }
+    #[test]
+    fn legacy_channel_remains_valid_but_is_not_trusted_as_v2() {
+        let legacy = include_bytes!("../assets/legacy-update-v1.json");
+        let old_key = unhex(include_str!("../assets/update-public-key-v1.hex").trim()).unwrap();
+        assert_eq!(verify_with_key(legacy, &old_key).unwrap().version, "0.4.16");
+        assert!(verify(legacy).is_err());
+        assert!(MANIFEST_URL.ends_with("/update-v2.json"));
+    }
+    #[test]
+    #[ignore = "requires FLOW_TEST_UPDATE_MANIFEST or a published v2 manifest"]
+    fn release_manifest_matches_embedded_key() {
+        let manifest = if let Some(path) = std::env::var_os("FLOW_TEST_UPDATE_MANIFEST") {
+            verify(&std::fs::read(path).unwrap()).unwrap()
+        } else {
+            check("").unwrap().0
+        };
+        assert_eq!(manifest.version, env!("CARGO_PKG_VERSION"));
+        assert!(version(&manifest.version).unwrap() > version("0.4.18").unwrap());
+        assert_eq!(
+            manifest.url,
+            format!(
+                "https://github.com/wrench1997/flow/releases/download/v{}/Flow.exe",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert!(manifest.size > 1_000_000);
+    }
     #[test]
     fn signed_manifest_rejects_tampering_and_wrong_key() {
         let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);

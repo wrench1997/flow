@@ -2,6 +2,7 @@
 import argparse, hashlib, json
 from pathlib import Path
 from cryptography.hazmat.primitives import serialization
+from update_signing import load_key
 p=argparse.ArgumentParser()
 p.add_argument('--exe',required=True)
 p.add_argument('--version',required=True)
@@ -9,7 +10,7 @@ p.add_argument('--key',required=True)
 p.add_argument('--out',required=True)
 a=p.parse_args()
 exe=Path(a.exe)
-key=serialization.load_pem_private_key(Path(a.key).read_bytes(),password=None)
+key=load_key(a.key)
 expected=bytes.fromhex((Path(__file__).resolve().parent.parent/'assets/update-public-key.hex').read_text().strip())
 actual=key.public_key().public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)
 if actual!=expected: raise SystemExit('Signing key does not match embedded public key')

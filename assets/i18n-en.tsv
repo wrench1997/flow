@@ -498,3 +498,4 @@ Cache|Cached peers
 已下载文件不在原位置：{}。如已移动或重命名，请放回原位置；点击继续可重新下载。|Downloaded file is missing from its original location: {}. Put it back if it was moved or renamed, or click Resume to download it again.
 已下载文件大小已改变：{}。请将原文件放回；如需重新下载，请先移走现有文件再点击继续。|Downloaded file size has changed: {}. Restore the original file, or move the existing file aside and click Resume to download again.
 无法检查已下载文件：{}|Cannot check downloaded file: {}
+当前安装 {}；更新通道清单为 {}，可打开发布页查看手动版本|Installed {}; update channel reports {}. Open the release page for manual releases.

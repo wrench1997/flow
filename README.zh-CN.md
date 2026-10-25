@@ -1,5 +1,11 @@
 # Flow 下载工作台
 
+## 新签名更新通道（0.4.19）
+
+- 从 [Flow 0.4.19 发布页](https://github.com/wrench1997/flow/releases/tag/v0.4.19) 手动安装一次，保留 `data/`、`runtime/` 和下载目录。旧版内置的是旧公钥，不能通过应用内更新跨越这次密钥更换。
+- 0.4.19 起通过 `update-v2.json` 检查后续更新，继续强制验证签名、文件大小和 SHA-256。GitHub Latest 指向当前发布版；旧版的 `update.json` 保留 0.4.16 的原签名清单，旧通道不再推进。
+- 更新清单比已安装版本旧时，显示两边的版本号，不再误称“当前已是最新版本”。
+
 ## 退出与 HTTP 完成状态修复（0.4.18）
 
 - 前往 [Flow 0.4.18 发布页面](https://github.com/wrench1997/flow/releases/tag/v0.4.18) 下载安装包、绿色 ZIP 或单独的主程序。本版手动升级，不提供应用内更新清单；替换前完全退出 Flow，保留原数据和下载目录。
@@ -140,7 +146,7 @@
 
 ## 构建与运行
 
-**直接使用成品：** 前往 [Flow 0.4.18 发布页面](https://github.com/wrench1997/flow/releases/tag/v0.4.18) 下载安装包、绿色 ZIP 或 `Flow.exe`。本版需手动升级，发布附件同时提供 SHA-256 校验文件。
+**直接使用成品：** 前往 [Flow 0.4.19 发布页面](https://github.com/wrench1997/flow/releases/tag/v0.4.19) 下载安装包、绿色 ZIP 或 `Flow.exe`。从旧版升级到本版需手动安装一次，之后使用新签名更新通道。发布附件提供 SHA-256 校验文件。
 
 当前支持的桌面目标为 **Windows x64（MSVC）**。源码构建需要 Rust/Cargo，以及包含 Windows SDK 的 Visual Studio C++ 构建工具。
 
@@ -159,6 +165,18 @@ cargo fmt --check
 ```
 
 仓库仅包含源码和应用素材，**不包含可执行文件、下载内容、本机任务状态、缓存或临时文件**。Windows 版本静态链接 C/C++ 运行库，使用成品无需安装 Python、Rust 或单独的 Visual C++ 运行库。
+
+### 发布签名密钥
+
+新私钥保存在本机 `%USERPROFILE%\.codex\secrets\flow\update-v2.dpapi`，由 Windows DPAPI 使用当前账户加密，不在工程、构建目录或 Git 仓库中。这个文件通常只能在创建它的电脑及 Windows 账户下解密；它不是云端备份。重装前应先完成离机密钥备份，不要只依赖这个加密文件。
+
+常规发布复用该密钥，无需再次生成：
+
+```powershell
+.\scripts\package-release.ps1 -Executable target\release\flow-download.exe -Version 0.4.19 -OutputDirectory output\release-0.4.19
+```
+
+`-SigningKey` 仍接受已有 PEM 文件，也接受上述 DPAPI 文件。打包会生成新通道的 `update-v2.json`，同时携带冻结的旧通道 `update.json`。私钥不得加入附件或聊天正文。`scripts/update_signing.py` 仅用于初次创建密钥，已有文件时会拒绝覆盖。
 
 ## 设置与操作
 
